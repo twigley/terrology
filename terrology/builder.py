@@ -532,7 +532,7 @@ class MapBuilder:
         osm_data: dict,
         contour_interval_m: float | None = None,
     ) -> np.ndarray:
-        """Return per-face colour index: 0=terrain, 1=water, 2=parks, 3=roads."""
+        """Return per-face colour index: 0=terrain 1=water 2=parks 3=roads 6=railways 7=sand."""
         from shapely import STRtree
 
         n_faces = len(terrain_mesh.faces)
@@ -558,8 +558,17 @@ class MapBuilder:
             if len(pt_idx):
                 color_idx[pt_idx] = cidx
 
-        # Paint in ascending priority (later overwrites earlier).
-        # 0. Sea — vector polygon for smooth coastline; elevation-based fallback.
+        # Paint in ascending priority (later overwrites earlier):
+        # sand → sea → parks → water → roads
+        # Sea after sand so the submerged part of the beach polygon (low-tide zone)
+        # is correctly covered by water rather than showing as sand.
+
+        # 0. Sand / beach — lowest priority so sea overwrites intertidal zone
+        g = self._gdf_to_utm(osm_data, "sand")
+        if g is not None:
+            _paint_tree(list(g.geometry), 7)
+
+        # 1. Sea — vector polygon for smooth coastline; elevation-based fallback.
         # Cap at _SEA_ELEV_CAP so cliff faces inside the polygon aren't painted sea.
         if self._sea_poly is not None:
             pt_idx, _ = STRtree([self._sea_poly]).query(pts, predicate="within")
@@ -579,7 +588,7 @@ class MapBuilder:
                 face_elevs = self._terrain_interp(np.column_stack([cy_utm, cx_utm]))
                 color_idx[face_elevs <= 1.5] = 1
 
-        # 1. Parks / green landuse / natural woodland
+        # 2. Parks / green landuse / natural woodland
         park_geoms: list = []
         for src in (
             "parks",
@@ -662,7 +671,7 @@ class MapBuilder:
                 road_geoms.extend(shapely.buffer(geom_arr[line_mask], dists[line_mask]))
             if poly_mask.any():
                 road_geoms.extend(geom_arr[poly_mask])
-        # Railways share the roads colour slot
+        # Railways — own colour slot (collapsed to roads by _limit_colors when n<6)
         g = self._gdf_to_utm(osm_data, "railways")
         if g is not None:
             rail_geoms = [
@@ -672,7 +681,7 @@ class MapBuilder:
                 and not geom.is_empty
                 and geom.geom_type in ("LineString", "MultiLineString")
             ]
-            road_geoms.extend(rail_geoms)
+            _paint_tree(rail_geoms, 6)
 
         # Paved polygon areas share the roads colour slot
         for src in ("pedestrian_areas", "aeroways", "parking"):
@@ -697,15 +706,20 @@ class MapBuilder:
             first_level = np.ceil(elev_min / contour_interval_m) * contour_interval_m
             is_contour = (first_level < elev_max) & (color_idx != 1)  # skip water
             base = color_idx[is_contour]
-            color_idx[is_contour] = np.where(np.isin(base, [0, 2]), 3, 0)
+            color_idx[is_contour] = np.where(np.isin(base, [0, 2, 7]), 3, 0)
             print(
                 f"  contours: {is_contour.sum():,} faces at {contour_interval_m:.0f} m intervals"
             )
 
         from terrology.exporter import COLOUR_NAMES
 
-        counts = [int((color_idx == i).sum()) for i in range(4)]
-        print("  " + "  ".join(f"{COLOUR_NAMES[i]} {counts[i]:,}" for i in range(4)))
+        active = sorted(int(i) for i in np.unique(color_idx))
+        print(
+            "  "
+            + "  ".join(
+                f"{COLOUR_NAMES[i]} {int((color_idx == i).sum()):,}" for i in active
+            )
+        )
         return color_idx
 
     def colorize_route(

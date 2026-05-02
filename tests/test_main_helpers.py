@@ -106,6 +106,34 @@ def test_limit_colors_does_not_mutate():
     np.testing.assert_array_equal(fc, orig)
 
 
+def test_limit_colors_5_unchanged():
+    fc = np.array([0, 1, 2, 3, 6, 7])
+    out = _limit_colors(fc, 5)
+    # buildings (4) not in face_colors; sand(7) and railways(6) both collapse
+    assert out[4] == 3  # railways → roads
+    assert out[5] == 0  # sand → terrain
+
+
+def test_limit_colors_6_railways_kept():
+    fc = np.array([0, 1, 2, 3, 6, 7])
+    out = _limit_colors(fc, 6)
+    assert out[4] == 6  # railways preserved
+    assert out[5] == 0  # sand → terrain
+
+
+def test_limit_colors_7_all_kept():
+    fc = np.array([0, 1, 2, 3, 6, 7])
+    out = _limit_colors(fc, 7)
+    np.testing.assert_array_equal(out, fc)
+
+
+def test_limit_colors_railways_cascade_to_terrain():
+    # When slots<3, railways should first merge to roads then roads merge to terrain
+    fc = np.array([6])
+    out = _limit_colors(fc, 2)
+    assert out[0] == 0  # railways → roads → terrain
+
+
 def _write_geojson(tmp_path, data):
     p = tmp_path / "area.geojson"
     p.write_text(json.dumps(data))
