@@ -178,3 +178,16 @@ uv run main.py "Peak District" --radius 3000 --contour-interval 25 --terrain-exa
 **Bridges** — road and railway segments tagged `bridge=yes` in OSM sit at the correct elevated position rather than being depressed into the hillside.
 
 **Slicers without OBJ support** — import `terrain.stl`, `water.stl`, `parks.stl`, and `roads.stl` together and assign each a filament. Only files for features present in the map are written.
+
+---
+
+## Data sources
+
+Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright), licensed under the [Open Database Licence](https://opendatacommons.org/licenses/odbl/).
+
+Elevation data provided by [OpenTopography](https://opentopography.org/). Datasets used:
+
+- **COP30** — © DLR/ESA, distributed under CC BY 4.0
+- **SRTMGL1 / NASADEM** — NASA/USGS, public domain
+- **AW3D30** — © JAXA, distributed under CC BY 4.0
+- **EU_DTM** — © Copernicus Land Monitoring Service / EEA
