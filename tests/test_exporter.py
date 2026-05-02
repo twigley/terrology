@@ -306,3 +306,58 @@ def test_export_obj_mtl_only_used_colors(tmp_path):
     assert "newmtl water" in mtl
     assert "newmtl parks" not in mtl
     assert "newmtl roads" not in mtl
+
+
+def test_export_obj_buildings_share_terrain_at_4_colors(tmp_path):
+    from terrology.exporter import export_obj
+
+    out = tmp_path / "model.obj"
+    export_obj({"terrain_base": _box_mesh(), "buildings": _box_mesh()}, out, n_colors=4)
+
+    obj_section = out.read_text().split("o buildings")[1].split("\no ")[0]
+    assert "usemtl terrain" in obj_section
+    assert "usemtl buildings" not in obj_section
+
+
+def test_export_obj_buildings_own_material_at_5_colors(tmp_path):
+    from terrology.exporter import export_obj
+
+    out = tmp_path / "model.obj"
+    export_obj({"terrain_base": _box_mesh(), "buildings": _box_mesh()}, out, n_colors=5)
+
+    obj_section = out.read_text().split("o buildings")[1].split("\no ")[0]
+    assert "usemtl buildings" in obj_section
+    mtl = (tmp_path / "model.mtl").read_text()
+    assert "newmtl buildings" in mtl
+
+
+def test_export_3mf_railways_in_basematerials(tmp_path):
+    import zipfile
+
+    from terrology.exporter import export_3mf
+
+    mesh = _flat_mesh(6)
+    fc = np.zeros(len(mesh.faces), dtype=np.int32)
+    fc[: len(fc) // 2] = 6  # railways
+
+    out = tmp_path / "model.3mf"
+    export_3mf({"terrain_top": mesh}, out, terrain_face_colors=fc, n_colors=6)
+    with zipfile.ZipFile(str(out)) as zf:
+        model = zf.read("3D/3dmodel.model").decode()
+    assert 'name="railways"' in model
+
+
+def test_export_3mf_sand_in_basematerials(tmp_path):
+    import zipfile
+
+    from terrology.exporter import export_3mf
+
+    mesh = _flat_mesh(6)
+    fc = np.zeros(len(mesh.faces), dtype=np.int32)
+    fc[: len(fc) // 2] = 7  # sand
+
+    out = tmp_path / "model.3mf"
+    export_3mf({"terrain_top": mesh}, out, terrain_face_colors=fc, n_colors=7)
+    with zipfile.ZipFile(str(out)) as zf:
+        model = zf.read("3D/3dmodel.model").decode()
+    assert 'name="sand"' in model

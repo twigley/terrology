@@ -141,9 +141,9 @@ def main() -> None:
         "--colors",
         type=int,
         default=4,
-        help="Number of filament colours (default: 4). Buildings share the terrain colour. "
-        "Slots: terrain+buildings (always), water, roads, parks. "
-        "4=terrain+water+roads+parks, 3=terrain+water+roads, 2=terrain+water, 1=terrain only.",
+        help="Number of filament colours (default: 4). "
+        "1=terrain only, 2=+water, 3=+roads, 4=+parks, "
+        "5=+buildings (separate from terrain), 6=+railways, 7=+sand/beach.",
     )
     parser.add_argument(
         "--area",
@@ -186,6 +186,10 @@ def main() -> None:
         "Uses a contrasting colour from the existing 4-slot palette.",
     )
     args = parser.parse_args()
+
+    if args.colors < 1 or args.colors > 7:
+        print("ERROR: --colors must be between 1 and 7.")
+        sys.exit(1)
 
     if not args.route and not args.location and not args.area:
         print("ERROR: provide a location, --route <gpx-file>, or --area <geojson-file>")
@@ -458,7 +462,12 @@ def main() -> None:
     parts = {k: v for k, v in parts.items() if v is not None}
 
     print("\nExporting OBJ...")
-    export_obj(parts, out_dir / "model.obj", terrain_face_colors=terrain_face_colors)
+    export_obj(
+        parts,
+        out_dir / "model.obj",
+        terrain_face_colors=terrain_face_colors,
+        n_colors=args.colors,
+    )
 
     print("Exporting 3MF...")
     export_3mf(
@@ -466,6 +475,7 @@ def main() -> None:
         out_dir / "model.3mf",
         terrain_face_colors=terrain_face_colors,
         color_depth_mm=args.color_depth,
+        n_colors=args.colors,
     )
 
     print("\nDone!")
@@ -477,12 +487,20 @@ def main() -> None:
 def _limit_colors(face_colors, n_total: int):
     """
     Merge terrain feature colours so the total filament count stays within
-    n_total.  Buildings share the terrain slot, so all n_total slots are
-    available for terrain features.  Merge order: parks first (earthy, blends
-    into sand/stone), roads second, water last (highest visual importance).
+    n_total.  Buildings (slot 5) are a separate mesh object handled by the
+    exporter, not a face colour, so all n_total slots are available for
+    terrain-surface features.
+
+    Merge order (least important first):
+      sand(7) → terrain, railways(6) → roads, parks(2) → terrain,
+      roads(3) → terrain, water(1) → terrain
     """
     slots = max(1, n_total)
     result = face_colors.copy()
+    if slots < 7:
+        result[result == 7] = 0  # sand → terrain
+    if slots < 6:
+        result[result == 6] = 3  # railways → roads
     if slots < 4:
         result[result == 2] = 0  # parks → terrain
     if slots < 3:

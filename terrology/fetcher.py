@@ -35,6 +35,7 @@ OSM_TAGS = {
     "aeroways": {"aeroway": ["runway", "taxiway", "apron"]},
     "parking": {"amenity": "parking"},
     "pedestrian_areas": {"place": "square"},
+    "sand": {"natural": ["beach", "sand"], "landuse": "beach"},
 }
 
 

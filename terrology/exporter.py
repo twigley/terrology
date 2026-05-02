@@ -3,8 +3,17 @@ from pathlib import Path
 import numpy as np
 import trimesh
 
-# 0=terrain  1=water  2=parks  3=roads  (buildings = separate OBJ object)
-COLOUR_NAMES = ["terrain", "water", "parks", "roads", "buildings", "route"]
+# 0=terrain  1=water  2=parks  3=roads  4=buildings  5=route  6=railways  7=sand
+COLOUR_NAMES = [
+    "terrain",
+    "water",
+    "parks",
+    "roads",
+    "buildings",
+    "route",
+    "railways",
+    "sand",
+]
 _COLOURS_RGB = [
     (180, 160, 130),  # 0 terrain   — stone/sand
     (70, 140, 210),  # 1 water     — blue
@@ -12,6 +21,8 @@ _COLOURS_RGB = [
     (220, 215, 200),  # 3 roads     — light warm grey
     (235, 220, 195),  # 4 buildings — cream
     (210, 55, 35),  # 5 route     — vivid red
+    (70, 65, 60),  # 6 railways  — dark charcoal
+    (235, 210, 140),  # 7 sand     — warm golden
 ]
 
 _OBJECT_MAT = {
@@ -100,6 +111,7 @@ def export_3mf(
     path: Path,
     terrain_face_colors: "np.ndarray | None" = None,
     color_depth_mm: float = 1.5,
+    n_colors: int = 4,
 ) -> None:
     """
     Write a standard 3MF file with one object per colour.
@@ -133,7 +145,7 @@ def export_3mf(
         '   Type="http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel"/>\n'
         "</Relationships>"
     )
-    objects = _3mf_objects(parts, terrain_face_colors, color_depth_mm)
+    objects = _3mf_objects(parts, terrain_face_colors, color_depth_mm, n_colors)
     model_xml = _build_3mf_model(objects)
 
     with zipfile.ZipFile(str(path), "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
@@ -150,10 +162,11 @@ def _3mf_objects(
     parts: dict,
     terrain_face_colors: "np.ndarray | None",
     color_depth_mm: float,
+    n_colors: int = 4,
 ) -> "list[tuple[str, trimesh.Trimesh, int]]":
     """
     Return (name, mesh, colour_index) tuples — one entry per colour present.
-    colour_index matches the basematerials order: 0=terrain 1=water 2=parks 3=roads.
+    colour_index is the COLOUR_NAMES index used as p1 in basematerials.
     """
     objects: list[tuple[str, trimesh.Trimesh, int]] = []
 
@@ -190,18 +203,21 @@ def _3mf_objects(
         )
         objects.append(("terrain", terrain_mesh, 0))
 
-    # Per-colour surface solids: water (1), parks (2), roads (3)
+    # Per-colour surface solids — one object per non-zero colour present in face_colors
     if terrain_top is not None and terrain_face_colors is not None:
-        for cidx in range(1, 4):
+        for cidx in np.unique(terrain_face_colors):
+            if cidx == 0:
+                continue
             face_idx = np.where((terrain_face_colors == cidx) & top_face_mask)[0]
             if len(face_idx) == 0:
                 continue
             solid = _patch_to_solid(terrain_top, face_idx, color_depth_mm)
             if solid is not None:
-                objects.append((COLOUR_NAMES[cidx], solid, cidx))
+                objects.append((COLOUR_NAMES[cidx], solid, int(cidx)))
 
     if buildings is not None:
-        objects.append(("buildings", buildings, 0))
+        buildings_cidx = 4 if n_colors >= 5 else 0
+        objects.append(("buildings", buildings, buildings_cidx))
 
     return objects
 
@@ -217,7 +233,8 @@ def _build_3mf_model(
         " <resources>\n",
         '  <basematerials id="1">\n',
     ]
-    for i in range(4):
+    max_cidx = max((cidx for _, _, cidx in objects), default=3)
+    for i in range(max(4, max_cidx + 1)):
         r, g, b = _COLOURS_RGB[i]
         out.append(
             f'   <base name="{COLOUR_NAMES[i]}" displaycolor="#{r:02X}{g:02X}{b:02X}"/>\n'
@@ -261,6 +278,7 @@ def export_obj(
     parts: dict,
     path: Path,
     terrain_face_colors: "np.ndarray | None" = None,
+    n_colors: int = 4,
 ) -> None:
     """
     Write a coloured OBJ + MTL file.
@@ -277,9 +295,11 @@ def export_obj(
     mtl_path = path.parent / mtl_filename
 
     # Work out which material indices are actually used so we only write those
-    used: set[int] = {0}  # terrain always needed (buildings share it)
+    used: set[int] = {0}  # terrain always needed
     if terrain_face_colors is not None:
         used.update(int(i) for i in np.unique(terrain_face_colors))
+    if n_colors >= 5 and "buildings" in valid:
+        used.add(4)
 
     # --- MTL file ---
     with open(mtl_path, "w") as f:
@@ -320,7 +340,10 @@ def export_obj(
                     f.write(f"usemtl {COLOUR_NAMES[cidx]}\n")
                     np.savetxt(f, sorted_faces[s:e], fmt="f %d %d %d")
             else:
-                mat = _OBJECT_MAT.get(obj_name, "terrain")
+                if obj_name == "buildings" and n_colors >= 5:
+                    mat = "buildings"
+                else:
+                    mat = _OBJECT_MAT.get(obj_name, "terrain")
                 f.write(f"usemtl {mat}\n")
                 np.savetxt(f, faces_1b, fmt="f %d %d %d")
 
