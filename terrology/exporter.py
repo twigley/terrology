@@ -28,7 +28,6 @@ _COLOURS_RGB = [
 _OBJECT_MAT = {
     "terrain_base": "terrain",
     "terrain_top": "terrain",  # overridden per-face when terrain_face_colors present
-    "buildings": "terrain",
 }
 
 
@@ -293,13 +292,14 @@ def export_obj(
     valid = {k: v for k, v in parts.items() if v is not None}
     mtl_filename = path.stem + ".mtl"
     mtl_path = path.parent / mtl_filename
+    buildings_cidx = 4 if n_colors >= 5 else 0
 
     # Work out which material indices are actually used so we only write those
     used: set[int] = {0}  # terrain always needed
     if terrain_face_colors is not None:
         used.update(int(i) for i in np.unique(terrain_face_colors))
-    if n_colors >= 5 and "buildings" in valid:
-        used.add(4)
+    if buildings_cidx and "buildings" in valid:
+        used.add(buildings_cidx)
 
     # --- MTL file ---
     with open(mtl_path, "w") as f:
@@ -340,10 +340,11 @@ def export_obj(
                     f.write(f"usemtl {COLOUR_NAMES[cidx]}\n")
                     np.savetxt(f, sorted_faces[s:e], fmt="f %d %d %d")
             else:
-                if obj_name == "buildings" and n_colors >= 5:
-                    mat = "buildings"
-                else:
-                    mat = _OBJECT_MAT.get(obj_name, "terrain")
+                mat = (
+                    COLOUR_NAMES[buildings_cidx]
+                    if obj_name == "buildings"
+                    else _OBJECT_MAT.get(obj_name, "terrain")
+                )
                 f.write(f"usemtl {mat}\n")
                 np.savetxt(f, faces_1b, fmt="f %d %d %d")
 
