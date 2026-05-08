@@ -118,11 +118,14 @@ class MapBuilder:
         nrows, ncols = elevation_arr.shape
         xll = header.get("xllcorner", header.get("xllcenter", 0.0))
         yll = header.get("yllcorner", header.get("yllcenter", 0.0))
-        cs = header["cellsize"]
+        cs_x = header["cellsize"]
+        cs_y = header.get(
+            "cellsize_y", cs_x
+        )  # GLO-30 has non-square pixels at high lat
 
         # Geographic coordinates of each grid cell (AAIGrid: row 0 = northernmost)
-        lons = xll + (np.arange(ncols) + 0.5) * cs
-        lats = yll + (nrows - 0.5 - np.arange(nrows)) * cs
+        lons = xll + (np.arange(ncols) + 0.5) * cs_x
+        lats = yll + (nrows - 0.5 - np.arange(nrows)) * cs_y
         # Regular UTM grid for the model
         gx_1d = np.linspace(self.x_min, self.x_max, self.grid_size)
         gy_1d = np.linspace(self.y_min, self.y_max, self.grid_size)
