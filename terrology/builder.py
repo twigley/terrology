@@ -422,7 +422,7 @@ class MapBuilder:
 
         elevated_mask = np.zeros(len(pts), dtype=bool)
         if elevated_geoms:
-            idx, _ = STRtree(elevated_geoms).query(pts, predicate="within")
+            idx, _ = STRtree(elevated_geoms).query(pts, predicate="covered_by")
             elevated_mask[idx] = True
 
         # line_buf: buffer radius in metres for line geometries (0 = polygon, no buffer)
