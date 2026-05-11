@@ -16,9 +16,38 @@ _DEFAULT_ROOF_HEIGHT_M = (
     3.0  # roof height when roof:shape is set but roof:height is absent
 )
 _ROAD_DEPRESS_M = 0.15  # terrain depression for roads (real metres)
-_WATER_DEPRESS_M = 0.40  # terrain depression for water
 _BASE_THICKNESS_MM = 3.0
-_SEA_ELEV_CAP = 8.0  # faces above this elevation (m) aren't painted sea even if inside the coastline polygon
+
+# Road type tiers — buffer radius in real metres for each highway category
+_MAJOR_ROAD_TYPES = frozenset(
+    {
+        "motorway",
+        "motorway_link",
+        "trunk",
+        "trunk_link",
+        "primary",
+        "primary_link",
+    }
+)
+_SECONDARY_ROAD_TYPES = frozenset(
+    {
+        "secondary",
+        "secondary_link",
+        "tertiary",
+        "tertiary_link",
+    }
+)
+_PATH_TYPES = frozenset(
+    {
+        "footway",
+        "path",
+        "cycleway",
+        "steps",
+        "pedestrian",
+        "bridleway",
+        "track",
+    }
+)
 
 
 def _utm_crs(lon: float, lat: float) -> CRS:
@@ -55,6 +84,8 @@ class MapBuilder:
         color_grid_size: int = 400,
         clip_poly=None,
         building_exag: float | None = None,
+        min_building_area_m2: float = 4.0,
+        water_depth_mm: float = 0.8,
     ):
         self.lat = lat
         self.lon = lon
@@ -77,6 +108,8 @@ class MapBuilder:
         self.mm_per_m = 1000.0 / scale
         self.color_depth_mm = color_depth_mm
         self.color_grid_size = color_grid_size
+        self.min_building_area_m2 = min_building_area_m2
+        self.water_depth_mm = water_depth_mm
         self.clip_poly = clip_poly  # UTM metres, or None
         if clip_poly is not None:
             from shapely.affinity import scale as _affine_scale
@@ -126,6 +159,17 @@ class MapBuilder:
         # Geographic coordinates of each grid cell (AAIGrid: row 0 = northernmost)
         lons = xll + (np.arange(ncols) + 0.5) * cs_x
         lats = yll + (nrows - 0.5 - np.arange(nrows)) * cs_y
+
+        # Build sea polygon early — the direction-based approach needs only the
+        # coastline GDF, not the terrain interpolator.  We then zero out sea DEM cells
+        # so the interpolated terrain is flat at 0 m instead of NaN-filled with
+        # adjacent cliff heights (GLO-30 has no data for the open sea).
+        self._sea_poly = self._build_sea_polygon(osm_data)
+        if self._sea_poly is not None:
+            elevation_arr = _apply_sea_mask(
+                elevation_arr, header, self._sea_poly, self.utm_crs
+            )
+
         # Regular UTM grid for the model
         gx_1d = np.linspace(self.x_min, self.x_max, self.grid_size)
         gy_1d = np.linspace(self.y_min, self.y_max, self.grid_size)
@@ -186,14 +230,24 @@ class MapBuilder:
             np.column_stack([gy_f.ravel(), gx_f.ravel()])
         ).reshape(fine, fine)
 
-        # Build sea polygon before parallel threads so both can read self._sea_poly safely
-        self._sea_poly = self._build_sea_polygon(osm_data)
+        # Pre-compute elevated geometry (piers, bridges) once, outside the parallel
+        # threads, to avoid concurrent _gdf_to_utm / to_crs() calls on shared GDFs.
+        elevated_geoms = self._build_elevated_geoms(osm_data)
 
         elev_mod = elev.copy()
         elev_f_mod = elev_f.copy()
         with ThreadPoolExecutor(max_workers=2) as ex:
-            d1 = ex.submit(self._apply_depressions, elev_mod, osm_data, gx, gy)
-            d2 = ex.submit(self._apply_depressions, elev_f_mod, osm_data, gx_f, gy_f)
+            d1 = ex.submit(
+                self._apply_depressions, elev_mod, osm_data, gx, gy, elevated_geoms
+            )
+            d2 = ex.submit(
+                self._apply_depressions,
+                elev_f_mod,
+                osm_data,
+                gx_f,
+                gy_f,
+                elevated_geoms,
+            )
             d1.result()
             d2.result()
 
@@ -244,18 +298,17 @@ class MapBuilder:
 
     def _build_sea_polygon(self, osm_data: dict):
         """
-        Construct a sea polygon by polygonizing OSM coastline linestrings clipped to the
-        bbox boundary.  Returns a shapely geometry or None (caller falls back to the
-        elevation-based approach).  Requires self._terrain_interp to be set.
+        Construct a sea polygon from OSM coastline linestrings clipped to the bbox.
+
+        Uses the OSM coastline direction convention (sea on the left when traversing)
+        to identify the sea polygon.  This avoids relying on DEM elevation values in
+        sea areas, which are filled from nearest land (often > 10 m) in GLO-30.
+        Falls back to centroid elevation if the direction heuristic yields no match.
         """
         from shapely.ops import polygonize_full, unary_union
 
         coastlines_gdf = self._gdf_to_utm(osm_data, "coastlines")
-        if (
-            coastlines_gdf is None
-            or len(coastlines_gdf) == 0
-            or self._terrain_interp is None
-        ):
+        if coastlines_gdf is None or len(coastlines_gdf) == 0:
             return None
 
         bbox_poly = shapely_box(self.x_min, self.y_min, self.x_max, self.y_max)
@@ -263,28 +316,93 @@ class MapBuilder:
         if not lines:
             return None
 
-        # Clip each coastline to the bbox so the bbox exterior closes open coastlines
-        clipped = [ln.intersection(bbox_poly) for ln in lines]
-        clipped = [c for c in clipped if not c.is_empty]
-        if not clipped:
+        # Clip each coastline to the bbox; preserve correspondence for direction detection
+        paired = [(orig, orig.intersection(bbox_poly)) for orig in lines]
+        paired = [(o, c) for o, c in paired if not c.is_empty]
+        if not paired:
             return None
 
-        combined = unary_union(clipped + [bbox_poly.exterior])
+        clip_only = [c for _, c in paired]
+        combined = unary_union(clip_only + [bbox_poly.exterior])
         polys = list(polygonize_full(combined)[0].geoms)
         if not polys:
             return None
+
+        # The user-specified location is almost always on land, so the sea polygon
+        # must not contain the bbox centre.  Filter first; direction voting then
+        # picks the best candidate from the survivors.
+        centre = shapely_box(
+            (self.x_min + self.x_max) / 2.0 - 1,
+            (self.y_min + self.y_max) / 2.0 - 1,
+            (self.x_min + self.x_max) / 2.0 + 1,
+            (self.y_min + self.y_max) / 2.0 + 1,
+        ).centroid
+        sea_candidates = [p for p in polys if not p.contains(centre)]
+        if not sea_candidates:
+            sea_candidates = polys  # edge case: user location is at sea
+
+        # Direction voting: use original line direction (pre-clip) so shapely's
+        # intersection cannot reverse winding; clipped midpoints keep candidates
+        # inside the bbox.
+        orig_lines = [o for o, _ in paired]
+        clip_geoms = [c for _, c in paired]
+
+        from collections import Counter
+
+        poly_votes: Counter = Counter()
+        for sea_pt in _sea_side_candidates(orig_lines, clip_geoms):
+            for i, p in enumerate(sea_candidates):
+                if p.contains(sea_pt):
+                    poly_votes[i] += 1
+
+        if poly_votes:
+            best_idx = poly_votes.most_common(1)[0][0]
+            print("  sea polygon: identified by coastline direction")
+            return sea_candidates[best_idx]
+
+        # No directional votes — fall back to lowest centroid elevation.
+        if self._terrain_interp is None:
+            return sea_candidates[0] if len(sea_candidates) == 1 else None
 
         def _centroid_elev(p) -> float:
             c = p.centroid
             return float(self._terrain_interp([[c.y, c.x]])[0])
 
-        sea_poly = min(polys, key=_centroid_elev)
+        sea_poly = min(sea_candidates, key=_centroid_elev)
         elev = _centroid_elev(sea_poly)
-        # Reject if the chosen polygon's centroid isn't plausibly at sea level
         if elev > 10.0:
             return None
-        print(f"  sea polygon: centroid elevation {elev:.1f} m")
+        print(f"  sea polygon: centroid elevation {elev:.1f} m (fallback)")
         return sea_poly
+
+    def _build_elevated_geoms(self, osm_data: dict) -> list:
+        """Return UTM-projected geometries for piers and bridge road/rail segments.
+
+        Called once before the parallel depression threads so _gdf_to_utm is never
+        invoked from multiple threads simultaneously on the same GeoDataFrame.
+        """
+        geoms: list = []
+        pier_gdf = self._gdf_to_utm(osm_data, "piers")
+        if pier_gdf is not None:
+            for geom in pier_gdf.geometry:
+                if geom is None or geom.is_empty:
+                    continue
+                if geom.geom_type in ("LineString", "MultiLineString"):
+                    geom = geom.buffer(3.0)
+                geoms.append(geom)
+        for road_layer in ("roads", "railways"):
+            road_gdf = self._gdf_to_utm(osm_data, road_layer)
+            if road_gdf is not None and "bridge" in road_gdf.columns:
+                bridges = road_gdf[
+                    road_gdf["bridge"].notna()
+                    & (road_gdf["bridge"] != "no")
+                    & (road_gdf["bridge"] != False)  # noqa: E712
+                ]
+                for geom in bridges.geometry:
+                    if geom is None or geom.is_empty:
+                        continue
+                    geoms.append(geom.buffer(10.0))
+        return geoms
 
     def _apply_depressions(
         self,
@@ -292,18 +410,29 @@ class MapBuilder:
         osm_data: dict,
         gx: np.ndarray,
         gy: np.ndarray,
+        elevated_geoms: list,
     ) -> None:
         from shapely import STRtree
+
+        # Convert model-space water depth to real metres so the recession is
+        # always physically visible regardless of scale or exaggeration.
+        water_depress_m = self.water_depth_mm / (self.terrain_exag * self.mm_per_m)
+
+        pts = shapely.points(gx.ravel(), gy.ravel())
+
+        elevated_mask = np.zeros(len(pts), dtype=bool)
+        if elevated_geoms:
+            idx, _ = STRtree(elevated_geoms).query(pts, predicate="within")
+            elevated_mask[idx] = True
 
         # line_buf: buffer radius in metres for line geometries (0 = polygon, no buffer)
         layers = [
             ("roads", _ROAD_DEPRESS_M, 4.0),
             ("railways", _ROAD_DEPRESS_M, 4.0),
-            ("waterways", _WATER_DEPRESS_M, 2.0),
-            ("water_area", _WATER_DEPRESS_M, 0.0),
-            ("water_landuse", _WATER_DEPRESS_M, 0.0),
+            ("waterways", water_depress_m, 2.0),
+            ("water_area", water_depress_m, 0.0),
+            ("water_landuse", water_depress_m, 0.0),
         ]
-        pts = shapely.points(gx.ravel(), gy.ravel())
 
         for layer_name, depression_m, line_buf in layers:
             gdf_utm = self._gdf_to_utm(osm_data, layer_name)
@@ -317,6 +446,11 @@ class MapBuilder:
                     | (gdf_utm["bridge"] == False)  # noqa: E712
                 )
                 gdf_utm = gdf_utm[keep]
+
+            if layer_name == "water_area" and "natural" in gdf_utm.columns:
+                # Bays are marine features; the sea polygon handles their depression.
+                # Keeping them here causes double-depression at bay boundaries.
+                gdf_utm = gdf_utm[gdf_utm["natural"] != "bay"]
 
             geoms = []
             for geom in gdf_utm.geometry:
@@ -333,17 +467,26 @@ class MapBuilder:
             if len(pt_idx):
                 mask = np.zeros(len(pts), dtype=bool)
                 mask[pt_idx] = True
+                if layer_name not in ("roads", "railways"):
+                    mask &= ~elevated_mask
                 elev.ravel()[mask] -= depression_m
 
-        # Sea depression — vector polygon (smooth coastline); elevation-based fallback
+        # Sea depression — same depth as inland water.
+        # _apply_sea_mask already zeroed sea cells to 0 m, so depressing by
+        # water_depress_m produces a small negative elevation that sits comfortably
+        # above the 3 mm base floor.  Piers and bridges are excluded so they stay
+        # at coast level (0 m) and appear raised above the recessed sea.
         if self._sea_poly is not None:
-            sea_pts = shapely.points(gx.ravel(), gy.ravel())
-            pt_idx, _ = STRtree([self._sea_poly]).query(sea_pts, predicate="within")
+            pt_idx, _ = STRtree([self._sea_poly]).query(pts, predicate="covered_by")
             if len(pt_idx):
-                elev.ravel()[pt_idx] -= _WATER_DEPRESS_M
+                mask = np.zeros(len(pts), dtype=bool)
+                mask[pt_idx] = True
+                mask &= ~elevated_mask
+                elev.ravel()[mask] -= water_depress_m
         else:
+            # Fallback when no OSM coastline polygon was found: depress by elevation threshold.
             if self._min_elev <= 1.5:
-                elev.ravel()[elev.ravel() <= 1.5] -= _WATER_DEPRESS_M
+                elev.ravel()[elev.ravel() <= 1.5] -= water_depress_m
 
     # ------------------------------------------------------------------ #
     # Buildings
@@ -381,7 +524,7 @@ class MapBuilder:
                 )
                 for poly in polys:
                     poly = poly.intersection(bbox_poly)
-                    if poly.is_empty or poly.area < 4.0:
+                    if poly.is_empty or poly.area < self.min_building_area_m2:
                         continue
                     if poly.geom_type != "Polygon":
                         skipped += 1
@@ -541,13 +684,17 @@ class MapBuilder:
         n_faces = len(terrain_mesh.faces)
         color_idx = np.zeros(n_faces, dtype=np.int32)
 
-        centroids = terrain_mesh.triangles_center  # (N, 3)
+        # Only query upward-facing faces — bottom and sidewall faces in the surface
+        # mesh are never used by the exporter but would otherwise inflate query count ~2×.
+        top_mask = terrain_mesh.face_normals[:, 2] > 0.5
+        top_indices = np.where(top_mask)[0]
+        centroids = terrain_mesh.triangles_center[top_mask]
         cx_utm = centroids[:, 0] / self.mm_per_m + self.x_min
         cy_utm = centroids[:, 1] / self.mm_per_m + self.y_min
         pts = shapely.points(cx_utm, cy_utm)
 
         def _paint_tree(geoms: list, cidx: int) -> None:
-            """Paint all faces whose centroid falls inside any geometry in geoms."""
+            """Paint upward-facing faces whose centroid falls inside any geometry."""
             valid = [
                 g
                 for g in geoms
@@ -559,7 +706,7 @@ class MapBuilder:
                 return
             pt_idx, _ = STRtree(valid).query(pts, predicate="within")
             if len(pt_idx):
-                color_idx[pt_idx] = cidx
+                color_idx[top_indices[pt_idx]] = cidx
 
         # Paint in ascending priority (later overwrites earlier):
         # sand → sea → parks → water → roads
@@ -572,24 +719,17 @@ class MapBuilder:
             _paint_tree(list(g.geometry), 7)
 
         # 1. Sea — vector polygon for smooth coastline; elevation-based fallback.
-        # Cap at _SEA_ELEV_CAP so cliff faces inside the polygon aren't painted sea.
         if self._sea_poly is not None:
-            pt_idx, _ = STRtree([self._sea_poly]).query(pts, predicate="within")
-            if len(pt_idx) and self._terrain_interp is not None:
-                face_elevs = self._terrain_interp(
-                    np.column_stack([cy_utm[pt_idx], cx_utm[pt_idx]])
-                )
-                sea_faces = pt_idx[face_elevs <= _SEA_ELEV_CAP]
-                color_idx[sea_faces] = 1
-            elif len(pt_idx):
-                color_idx[pt_idx] = 1
+            pt_idx, _ = STRtree([self._sea_poly]).query(pts, predicate="covered_by")
+            if len(pt_idx):
+                color_idx[top_indices[pt_idx]] = 1
         else:
             # Elevation-based fallback — activates when the bbox has terrain at or below
             # sea level, regardless of whether any coastline way was fetched from OSM.
             # Roads/parks painted at higher priority overwrite any misclassified town faces.
             if self._terrain_interp is not None and self._min_elev <= 1.5:
                 face_elevs = self._terrain_interp(np.column_stack([cy_utm, cx_utm]))
-                color_idx[face_elevs <= 1.5] = 1
+                color_idx[top_indices[face_elevs <= 1.5]] = 1
 
         # 2. Parks / green landuse / natural woodland
         park_geoms: list = []
@@ -630,17 +770,6 @@ class MapBuilder:
         _paint_tree(water_geoms, 1)
 
         # 3. Roads — vectorised buffer then bulk STRtree query
-        _PATH_TYPES = frozenset(
-            {
-                "footway",
-                "path",
-                "cycleway",
-                "steps",
-                "pedestrian",
-                "bridleway",
-                "track",
-            }
-        )
         road_geoms: list = []
         g = self._gdf_to_utm(osm_data, "roads")
         if g is not None:
@@ -652,7 +781,7 @@ class MapBuilder:
                     for hw in hw_raw
                 ]
             )
-            dists = np.where(np.isin(hw_strs, list(_PATH_TYPES)), 2.0, 5.0)
+            dists = np.array([_road_buffer_m(hw) for hw in hw_strs])
 
             line_mask = np.array(
                 [
@@ -934,6 +1063,115 @@ def _gabled_roof(poly_mm, wall_top_z: float, roof_h_mm: float) -> trimesh.Trimes
 
 def _hipped_roof(poly_mm, wall_top_z: float, roof_h_mm: float) -> trimesh.Trimesh:
     return _ridge_roof(poly_mm, wall_top_z, roof_h_mm, hip_fraction=1.0)
+
+
+def _apply_sea_mask(
+    elevation_arr: np.ndarray,
+    header: dict,
+    sea_poly,
+    utm_crs,
+) -> np.ndarray:
+    """
+    Replace DEM cells that fall inside sea_poly with 0.0 m (sea level).
+
+    GLO-30 has no coverage for the open sea; the NaN-fill in fetch_elevation()
+    assigns nearby land values (often cliff heights) to those cells.  Zeroing
+    them here means the interpolated terrain actually sits at sea level rather
+    than appearing as a raised plateau.
+    """
+    import shapely
+
+    nrows, ncols = elevation_arr.shape
+    xll = header.get("xllcorner", header.get("xllcenter", 0.0))
+    yll = header.get("yllcorner", header.get("yllcenter", 0.0))
+    cs_x = header["cellsize"]
+    cs_y = header.get("cellsize_y", cs_x)
+
+    lons = xll + (np.arange(ncols) + 0.5) * cs_x
+    lats = yll + (nrows - 0.5 - np.arange(nrows)) * cs_y
+    grid_lon, grid_lat = np.meshgrid(lons, lats)
+
+    wgs84 = CRS.from_epsg(4326)
+    to_utm = Transformer.from_crs(wgs84, utm_crs, always_xy=True)
+    utm_x, utm_y = to_utm.transform(grid_lon.ravel(), grid_lat.ravel())
+
+    from shapely import STRtree
+
+    pts = shapely.points(utm_x, utm_y)
+    idx, _ = STRtree([sea_poly]).query(pts, predicate="covered_by")
+    if len(idx) == 0:
+        return elevation_arr
+
+    arr = elevation_arr.copy()
+    arr.ravel()[idx] = 0.0
+    return arr
+
+
+def _sea_side_candidates(lines, clipped=None) -> list:
+    """
+    Generate candidate Points on the sea side of OSM coastline geometries.
+    OSM convention: sea is on the LEFT when traversing a coastline way.
+
+    `lines`   — original (unclipped) OSM geometries, used for direction only.
+                Avoids the coordinate-reversal that shapely's intersection can
+                introduce on complex linestrings.
+    `clipped` — bbox-clipped counterparts; midpoints are drawn from here so
+                candidates land inside the bounding box.  Defaults to `lines`.
+    """
+    from shapely.geometry import Point
+
+    if clipped is None:
+        clipped = lines
+
+    candidates = []
+    for orig, clip in zip(lines, clipped):
+        # Direction from the ORIGINAL segment (OSM winding order preserved).
+        orig_coords = (
+            list(orig.coords)
+            if orig.geom_type == "LineString"
+            else list(orig.geoms[0].coords)
+            if orig.geom_type == "MultiLineString" and orig.geoms
+            else []
+        )
+        if len(orig_coords) < 2:
+            continue
+        p0 = np.array(orig_coords[0][:2])
+        p1 = np.array(orig_coords[-1][:2])
+        d = p1 - p0
+        dist = float(np.linalg.norm(d))
+        if dist < 1.0:
+            continue
+        d /= dist
+        left = np.array([-d[1], d[0]])  # CCW rotation = left side = sea
+
+        # Midpoints from the CLIPPED segment so candidates lie within the bbox.
+        clip_segs = (
+            [clip]
+            if clip.geom_type == "LineString"
+            else list(clip.geoms)
+            if clip.geom_type == "MultiLineString"
+            else []
+        )
+        for seg in clip_segs:
+            if seg.is_empty or seg.length < 1.0:
+                continue
+            mid_pt = seg.interpolate(0.5, normalized=True)
+            mid = np.array([mid_pt.x, mid_pt.y])
+            for offset in (50.0, 200.0, 1000.0):
+                candidates.append(Point(mid + left * offset))
+
+    return candidates
+
+
+def _road_buffer_m(hw: str) -> float:
+    """Buffer radius in real metres for a road LineString by OSM highway type."""
+    if hw in _MAJOR_ROAD_TYPES:
+        return 10.0
+    if hw in _SECONDARY_ROAD_TYPES:
+        return 6.0
+    if hw in _PATH_TYPES:
+        return 1.5
+    return 4.0  # residential, unclassified, service, living_street, default
 
 
 def _heightfield_solid(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> trimesh.Trimesh:

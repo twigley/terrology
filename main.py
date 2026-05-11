@@ -44,6 +44,11 @@ def run_pipeline(
     nozzle: float = 0.4,
     output_dir: "str | Path" = "output",
     no_cache: bool = False,
+    skip_stls: bool = False,
+    min_building_area: float | None = None,
+    water_depth_mm: float = 0.8,
+    border_width_mm: float = 0.0,
+    label: str | None = None,
 ) -> Path:
     """Run the terrology pipeline for a single lat/lon point with a radius.
 
@@ -91,7 +96,9 @@ def run_pipeline(
     osm_north = max(c[1] for c in corners)
 
     max_useful = max(20, math.floor(max(model_x_mm, model_y_mm) / (nozzle * 2)))
-    actual_grid = min(grid_size, max_useful)
+    actual_grid = min(
+        grid_size, max_useful
+    )  # terrain base: cap at printable resolution
     actual_color_grid = min(color_grid_size, max_useful)
 
     print(f"\nLocation  : {lat:.5f}, {lon:.5f}")
@@ -127,6 +134,11 @@ def run_pipeline(
         f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
     )
 
+    min_bldg_area = (
+        min_building_area
+        if min_building_area is not None
+        else max(4.0, actual_scale / 1000.0)
+    )
     builder = MapBuilder(
         lat=lat,
         lon=lon,
@@ -140,17 +152,20 @@ def run_pipeline(
         color_depth_mm=color_depth_mm,
         color_grid_size=actual_color_grid,
         building_exag=building_exag,
+        min_building_area_m2=min_bldg_area,
+        water_depth_mm=water_depth_mm,
     )
 
     print(f"\nBuilding terrain mesh ({actual_grid}x{actual_grid})...")
     terrain_mesh = builder.build_terrain(elevation, header, osm_data)
-    export_stl(terrain_mesh, out_dir / "terrain.stl")
+    if not skip_stls:
+        export_stl(terrain_mesh, out_dir / "terrain.stl")
 
     buildings_mesh = None
     if not no_buildings:
         print("\nExtruding buildings...")
         buildings_mesh = builder.build_buildings(osm_data, with_roof_shapes=roof_shapes)
-        if buildings_mesh is not None:
+        if buildings_mesh is not None and not skip_stls:
             export_stl(buildings_mesh, out_dir / "buildings.stl")
 
     print("\nColouring terrain faces...")
@@ -161,13 +176,14 @@ def run_pipeline(
     )
     terrain_face_colors = _limit_colors(terrain_face_colors, colors)
 
-    print("\nExporting per-colour STLs...")
-    export_color_stls(
-        builder.terrain_surface_mesh,
-        terrain_face_colors,
-        out_dir,
-        color_depth_mm=color_depth_mm,
-    )
+    if not skip_stls:
+        print("\nExporting per-colour STLs...")
+        export_color_stls(
+            builder.terrain_surface_mesh,
+            terrain_face_colors,
+            out_dir,
+            color_depth_mm=color_depth_mm,
+        )
 
     parts = {
         "terrain_base": builder.terrain_base_mesh,
@@ -175,6 +191,31 @@ def run_pipeline(
         "buildings": buildings_mesh,
     }
     parts = {k: v for k, v in parts.items() if v is not None}
+
+    if border_width_mm > 0:
+        import trimesh as _trimesh
+
+        from terrology.builder import _BASE_THICKNESS_MM
+        from terrology.decorations import (
+            make_frame_mesh,
+            make_label_meshes,
+            make_scale_bar_mesh,
+        )
+
+        base_z = -_BASE_THICKNESS_MM
+        frame = make_frame_mesh(model_x_mm, model_y_mm, border_width_mm, base_z)
+        parts["border"] = frame
+
+        bar_mesh, bar_m = make_scale_bar_mesh(
+            builder.mm_per_m, model_x_mm, border_width_mm
+        )
+        parts["scale_bar"] = bar_mesh
+        print(f"  Scale bar: {bar_m:,} m")
+
+        if label:
+            label_parts = make_label_meshes(label, model_x_mm, border_width_mm)
+            if label_parts:
+                parts["label"] = _trimesh.util.concatenate(label_parts)
 
     print("\nExporting OBJ...")
     export_obj(
@@ -331,6 +372,37 @@ def main() -> None:
         "Uses roof:shape and roof:height tags where available.",
     )
     parser.add_argument(
+        "--min-building-area",
+        type=float,
+        default=None,
+        metavar="M2",
+        help="Minimum building footprint in m² (default: auto — scale/1000, e.g. 20 m² at 1:20000). "
+        "Increase to reduce noise on large-scale maps.",
+    )
+    parser.add_argument(
+        "--water-depth",
+        type=float,
+        default=0.8,
+        metavar="MM",
+        help="Depth in mm that water bodies are recessed below terrain (default: 0.8). "
+        "Converted to real-world metres based on scale and exaggeration.",
+    )
+    parser.add_argument(
+        "--border-width",
+        type=float,
+        default=0.0,
+        metavar="MM",
+        help="Width in mm of the raised border frame around the model (default: 0 = none). "
+        "Recommended: 6–8 mm. Adds a scale bar automatically.",
+    )
+    parser.add_argument(
+        "--label",
+        default=None,
+        metavar="TEXT",
+        help="Text label raised on the border strip (e.g. 'Southport\\n1:21000'). "
+        "Requires --border-width > 0. Use \\\\n for multiple lines.",
+    )
+    parser.add_argument(
         "--no-cache", action="store_true", help="Ignore and overwrite cached downloads"
     )
     parser.add_argument(
@@ -425,6 +497,10 @@ def main() -> None:
                 nozzle=args.nozzle,
                 output_dir=args.output,
                 no_cache=args.no_cache,
+                min_building_area=args.min_building_area,
+                water_depth_mm=args.water_depth,
+                border_width_mm=args.border_width,
+                label=args.label,
             )
             return
         lat2, lon2 = _resolve_location(args.to)
@@ -493,6 +569,11 @@ def main() -> None:
     use_cache = not args.no_cache
     elev_pad = 0.02  # degrees — ~2 km margin around the model bbox
 
+    min_bldg_area = (
+        args.min_building_area
+        if args.min_building_area is not None
+        else max(4.0, scale / 1000.0)
+    )
     builder = MapBuilder(
         lat=lat,
         lon=lon,
@@ -507,6 +588,8 @@ def main() -> None:
         color_grid_size=color_grid_size,
         clip_poly=area_poly_utm,
         building_exag=args.building_exag,
+        min_building_area_m2=min_bldg_area,
+        water_depth_mm=args.water_depth,
     )
 
     # Fetch data — route mode only needs elevation; normal mode fetches both in parallel
@@ -619,6 +702,32 @@ def main() -> None:
         "buildings": buildings_mesh,
     }
     parts = {k: v for k, v in parts.items() if v is not None}
+
+    if args.border_width > 0:
+        import trimesh as _trimesh
+
+        from terrology.builder import _BASE_THICKNESS_MM
+        from terrology.decorations import (
+            make_frame_mesh,
+            make_label_meshes,
+            make_scale_bar_mesh,
+        )
+
+        base_z = -_BASE_THICKNESS_MM
+        parts["border"] = make_frame_mesh(
+            model_x_mm, model_y_mm, args.border_width, base_z
+        )
+
+        bar_mesh, bar_m = make_scale_bar_mesh(
+            1000.0 / scale, model_x_mm, args.border_width
+        )
+        parts["scale_bar"] = bar_mesh
+        print(f"  Scale bar: {bar_m:,} m")
+
+        if args.label:
+            label_parts = make_label_meshes(args.label, model_x_mm, args.border_width)
+            if label_parts:
+                parts["label"] = _trimesh.util.concatenate(label_parts)
 
     print("\nExporting OBJ...")
     export_obj(

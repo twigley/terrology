@@ -28,6 +28,9 @@ _COLOURS_RGB = [
 _OBJECT_MAT = {
     "terrain_base": "terrain",
     "terrain_top": "terrain",  # overridden per-face when terrain_face_colors present
+    "border": "terrain",  # frame is a structural extension of the base
+    "scale_bar": "roads",  # light grey — contrasts against terrain-coloured frame
+    "label": "roads",  # assign this filament slot a dark colour in the slicer for best legibility
 }
 
 
@@ -101,7 +104,12 @@ def _patch_to_solid(
     sf2 = np.column_stack([a, n + b, n + a])
 
     solid = trimesh.Trimesh(vertices=verts, faces=np.vstack([tf, bf, sf1, sf2]))
-    trimesh.repair.fix_normals(solid)
+    # Top faces (tf) should have upward normals from the terrain surface mesh.
+    # If the mean z is negative the patch was wound downward — flip the whole solid.
+    # This replaces trimesh.repair.fix_normals which uses a slow NetworkX BFS.
+    if solid.face_normals[: len(tf), 2].mean() < 0:
+        solid.faces = solid.faces[:, ::-1]
+        solid._cache.clear()
     return solid
 
 
@@ -300,6 +308,8 @@ def export_obj(
         used.update(int(i) for i in np.unique(terrain_face_colors))
     if buildings_cidx and "buildings" in valid:
         used.add(buildings_cidx)
+    if any(k in valid for k in ("scale_bar", "label")):
+        used.add(COLOUR_NAMES.index("roads"))
 
     # --- MTL file ---
     with open(mtl_path, "w") as f:

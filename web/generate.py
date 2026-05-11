@@ -28,6 +28,8 @@ def run_job(job_id: str, params: dict) -> None:
             roof_shapes=params.get("roof_shapes", False),
             contour_interval=params.get("contour_interval"),
             output_dir=out_dir,
+            color_grid_size=600,
+            skip_stls=True,
         )
         store.update(job_id, status=JobStatus.READY)
     except Exception as exc:

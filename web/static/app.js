@@ -27,6 +27,7 @@ const buildingsBox  = document.getElementById("buildings");
 const roofBox       = document.getElementById("roof-shapes");
 const contourInput  = document.getElementById("contour");
 const scaleDisplay  = document.getElementById("scale-display");
+const minFeature    = document.getElementById("min-feature");
 const generateBtn   = document.getElementById("generate-btn");
 const statusArea    = document.getElementById("status-area");
 const statusIcon    = document.getElementById("status-icon");
@@ -45,6 +46,7 @@ function updateScale() {
     const r = parseInt(radiusSlider.value, 10);
     const s = Math.round(r * 2000 / 190);
     scaleDisplay.textContent = s.toLocaleString();
+    minFeature.textContent = Math.max(1, Math.round(r / 300));
 }
 
 function setPin(lat, lon) {
