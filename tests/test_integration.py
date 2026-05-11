@@ -741,3 +741,142 @@ def test_route_mode_paints_route_colour(tmp_path):
     assert "usemtl route" in obj
     mtl = (tmp_path / "model.mtl").read_text()
     assert "newmtl route" in mtl
+
+
+# ================================================================== #
+# Two-point (location --to) mode tests
+# ================================================================== #
+
+# Two points ~1.4 km apart in London — same area as the GPX track above.
+_PT1 = "51.497,-0.128"
+_PT2 = "51.503,-0.112"
+
+
+# ------------------------------------------------------------------ #
+# 25. --to basic output
+# ------------------------------------------------------------------ #
+
+
+def test_two_point_creates_expected_files(tmp_path):
+    _run_main(
+        [
+            "main.py",
+            _PT1,
+            "--to",
+            _PT2,
+            "--output",
+            str(tmp_path),
+            "--grid-size",
+            "10",
+            "--color-grid-size",
+            "20",
+            "--no-cache",
+        ]
+    )
+    assert (tmp_path / "model.obj").exists()
+    assert (tmp_path / "model.mtl").exists()
+    assert (tmp_path / "model.3mf").exists()
+    assert (tmp_path / "terrain.stl").exists()
+
+
+def test_two_point_obj_has_terrain_objects(tmp_path):
+    _run_main(
+        [
+            "main.py",
+            _PT1,
+            "--to",
+            _PT2,
+            "--output",
+            str(tmp_path),
+            "--grid-size",
+            "10",
+            "--color-grid-size",
+            "20",
+            "--no-cache",
+        ]
+    )
+    obj = (tmp_path / "model.obj").read_text()
+    assert "o terrain_base" in obj
+    assert "o terrain_top" in obj
+
+
+def test_two_point_with_border_and_label(tmp_path):
+    _run_main(
+        [
+            "main.py",
+            _PT1,
+            "--to",
+            _PT2,
+            "--output",
+            str(tmp_path),
+            "--grid-size",
+            "10",
+            "--color-grid-size",
+            "20",
+            "--border-width",
+            "6",
+            "--label",
+            "London A-B",
+            "--no-cache",
+        ]
+    )
+    obj = (tmp_path / "model.obj").read_text()
+    assert "o border" in obj
+    assert "o scale_bar" in obj
+    assert "o label" in obj
+
+
+def test_two_point_water_feature_in_mtl(tmp_path):
+    """Synthetic lake between the two points produces water material in MTL."""
+    lake = Polygon(
+        [
+            (-0.124, 51.499),
+            (-0.118, 51.499),
+            (-0.118, 51.501),
+            (-0.124, 51.501),
+        ]
+    )
+    osm = _empty_osm()
+    osm["water_area"] = _wgs84_gdf(lake, natural=["water"])
+    _run_main(
+        [
+            "main.py",
+            _PT1,
+            "--to",
+            _PT2,
+            "--output",
+            str(tmp_path),
+            "--grid-size",
+            "10",
+            "--color-grid-size",
+            "20",
+            "--colors",
+            "4",
+            "--no-cache",
+        ],
+        osm=osm,
+    )
+    mtl = (tmp_path / "model.mtl").read_text()
+    assert "newmtl water" in mtl
+
+
+def test_two_point_explicit_scale(tmp_path):
+    """--scale overrides the auto-calculated scale in two-point mode."""
+    _run_main(
+        [
+            "main.py",
+            _PT1,
+            "--to",
+            _PT2,
+            "--scale",
+            "5000",
+            "--output",
+            str(tmp_path),
+            "--grid-size",
+            "10",
+            "--color-grid-size",
+            "20",
+            "--no-cache",
+        ]
+    )
+    assert (tmp_path / "model.obj").exists()
