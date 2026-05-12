@@ -12,6 +12,7 @@ dependencies = [
     "mapbox-earcut>=2.0.0",
     "numpy>=2.4.4",
     "osmnx>=2.1.0",
+    "overturemaps>=0.7",
     "python-multipart>=0.0.20",
     "pyproj>=3.7.2",
     "rasterio>=1.3",

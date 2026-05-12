@@ -1,8 +1,10 @@
 import math
 
+import geopandas as gpd
 import numpy as np
+from shapely.geometry import box
 
-from terrology.fetcher import _parse_aaigrid
+from terrology.fetcher import _parse_aaigrid, supplement_buildings
 
 SIMPLE_GRID = """\
 ncols 3
@@ -74,3 +76,69 @@ def test_parse_aaigrid_yllcenter_header():
     _, h = _parse_aaigrid(YLLCENTER_GRID)
     assert "xllcenter" in h
     assert "yllcenter" in h
+
+
+# ------------------------------------------------------------------ #
+# supplement_buildings
+# ------------------------------------------------------------------ #
+
+
+def _make_gdf(polys, extra_cols=None):
+    data = {"geometry": polys}
+    if extra_cols:
+        data.update(extra_cols)
+    return gpd.GeoDataFrame(data, crs="EPSG:4326")
+
+
+def test_supplement_adds_non_overlapping():
+    """Overture footprints far from any OSM building are included."""
+    osm = _make_gdf([box(0, 0, 1, 1)], {"building": ["yes"]})
+    overture = _make_gdf([box(5, 5, 6, 6)], {"height": [10.0], "levels": [3]})
+    result = supplement_buildings(osm, overture)
+    assert len(result) == 2
+
+
+def test_supplement_skips_duplicate():
+    """Overture footprint that largely overlaps an OSM building is skipped."""
+    osm = _make_gdf([box(0, 0, 1, 1)], {"building": ["yes"]})
+    # 90% overlap with the OSM building
+    overture = _make_gdf(
+        [box(0.05, 0.05, 0.95, 0.95)], {"height": [8.0], "levels": [2]}
+    )
+    result = supplement_buildings(osm, overture)
+    assert len(result) == 1
+
+
+def test_supplement_includes_partial_overlap():
+    """Overture footprint with small overlap (<40%) is kept."""
+    osm = _make_gdf([box(0, 0, 1, 1)], {"building": ["yes"]})
+    # ~10% overlap
+    overture = _make_gdf([box(0.9, 0.9, 1.9, 1.9)], {"height": [5.0], "levels": [1]})
+    result = supplement_buildings(osm, overture)
+    assert len(result) == 2
+
+
+def test_supplement_empty_overture_returns_osm():
+    osm = _make_gdf([box(0, 0, 1, 1)])
+    overture = gpd.GeoDataFrame(
+        columns=["geometry", "height", "levels"], crs="EPSG:4326"
+    )
+    result = supplement_buildings(osm, overture)
+    assert len(result) == len(osm)
+
+
+def test_supplement_empty_osm_returns_overture():
+    osm = gpd.GeoDataFrame(columns=["geometry", "building"], crs="EPSG:4326")
+    overture = _make_gdf([box(0, 0, 1, 1)], {"height": [5.0], "levels": [1]})
+    result = supplement_buildings(osm, overture)
+    assert len(result) == 1
+    assert "building" in result.columns
+
+
+def test_supplement_preserves_height_column():
+    """Overture height values survive into the merged GDF."""
+    osm = _make_gdf([box(0, 0, 1, 1)])
+    overture = _make_gdf([box(5, 5, 6, 6)], {"height": [15.0], "levels": [4]})
+    result = supplement_buildings(osm, overture)
+    overture_row = result.iloc[-1]
+    assert float(overture_row["height"]) == 15.0

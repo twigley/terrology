@@ -79,3 +79,33 @@ def save_elevation(
     np.savez(path / "data.npz", elevation=arr)
     with open(path / "header.json", "w") as f:
         json.dump(header, f)
+
+
+# ------------------------------------------------------------------ #
+# Overture buildings
+# ------------------------------------------------------------------ #
+
+
+def _overture_path(south: float, north: float, west: float, east: float) -> Path:
+    return (
+        CACHE_DIR
+        / "overture"
+        / _key(round(south, 4), round(north, 4), round(west, 4), round(east, 4))
+    )
+
+
+def load_overture_buildings(south: float, north: float, west: float, east: float):
+    pkl = _overture_path(south, north, west, east) / "buildings.pkl"
+    if pkl.exists():
+        with open(pkl, "rb") as f:
+            return pickle.load(f)
+    return None
+
+
+def save_overture_buildings(
+    south: float, north: float, west: float, east: float, gdf
+) -> None:
+    path = _overture_path(south, north, west, east)
+    path.mkdir(parents=True, exist_ok=True)
+    with open(path / "buildings.pkl", "wb") as f:
+        pickle.dump(gdf, f)

@@ -61,7 +61,12 @@ def run_pipeline(
 
     from terrology.builder import MapBuilder, _utm_crs
     from terrology.exporter import export_3mf, export_color_stls, export_obj, export_stl
-    from terrology.fetcher import fetch_elevation, fetch_osm_data
+    from terrology.fetcher import (
+        fetch_elevation,
+        fetch_osm_data,
+        fetch_overture_buildings,
+        supplement_buildings,
+    )
 
     if colors < 1 or colors > 7:
         raise ValueError(f"colors must be 1–7, got {colors}")
@@ -109,8 +114,8 @@ def run_pipeline(
     use_cache = not no_cache
     elev_pad = 0.02
 
-    print("Fetching OSM data and elevation in parallel...")
-    with ThreadPoolExecutor(max_workers=2) as executor:
+    print("Fetching OSM, elevation and Overture data in parallel...")
+    with ThreadPoolExecutor(max_workers=3) as executor:
         osm_f = executor.submit(
             fetch_osm_data,
             south=osm_south,
@@ -126,6 +131,18 @@ def run_pipeline(
             west=osm_west - elev_pad,
             east=osm_east + elev_pad,
             use_cache=use_cache,
+        )
+        ov_f = (
+            executor.submit(
+                fetch_overture_buildings,
+                osm_south,
+                osm_north,
+                osm_west,
+                osm_east,
+                use_cache,
+            )
+            if not no_buildings
+            else None
         )
         osm_data = osm_f.result()
         elevation, header = elev_f.result()
@@ -160,6 +177,11 @@ def run_pipeline(
     terrain_mesh = builder.build_terrain(elevation, header, osm_data)
     if not skip_stls:
         export_stl(terrain_mesh, out_dir / "terrain.stl")
+
+    if not no_buildings:
+        osm_data["buildings"] = supplement_buildings(
+            osm_data.get("buildings"), ov_f.result()
+        )
 
     buildings_mesh = None
     if not no_buildings:
@@ -433,7 +455,12 @@ def main() -> None:
 
     from terrology.builder import MapBuilder
     from terrology.exporter import export_3mf, export_color_stls, export_obj, export_stl
-    from terrology.fetcher import fetch_elevation, fetch_osm_data
+    from terrology.fetcher import (
+        fetch_elevation,
+        fetch_osm_data,
+        fetch_overture_buildings,
+        supplement_buildings,
+    )
 
     out_dir = Path(args.output)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -612,8 +639,9 @@ def main() -> None:
     elif not args.no_terrain:
         from concurrent.futures import ThreadPoolExecutor
 
-        print("Fetching OSM data and elevation in parallel...")
-        with ThreadPoolExecutor(max_workers=2) as executor:
+        _need_ov = not args.route and not args.no_buildings
+        print("Fetching OSM, elevation and Overture data in parallel...")
+        with ThreadPoolExecutor(max_workers=3) as executor:
             osm_f = executor.submit(
                 fetch_osm_data,
                 south=osm_south,
@@ -630,6 +658,18 @@ def main() -> None:
                 east=osm_east + elev_pad,
                 use_cache=use_cache,
             )
+            ov_f = (
+                executor.submit(
+                    fetch_overture_buildings,
+                    osm_south,
+                    osm_north,
+                    osm_west,
+                    osm_east,
+                    use_cache,
+                )
+                if _need_ov
+                else None
+            )
             osm_data = osm_f.result()
             elevation, header = elev_f.result()
         print(
@@ -637,14 +677,37 @@ def main() -> None:
             f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
         )
     else:
-        print("Fetching OSM data...")
-        osm_data = fetch_osm_data(
-            south=osm_south,
-            north=osm_north,
-            west=osm_west,
-            east=osm_east,
-            use_cache=use_cache,
-        )
+        _need_ov = not args.route and not args.no_buildings
+        if _need_ov:
+            print("Fetching OSM and Overture data in parallel...")
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                osm_f = executor.submit(
+                    fetch_osm_data,
+                    south=osm_south,
+                    north=osm_north,
+                    west=osm_west,
+                    east=osm_east,
+                    use_cache=use_cache,
+                )
+                ov_f = executor.submit(
+                    fetch_overture_buildings,
+                    osm_south,
+                    osm_north,
+                    osm_west,
+                    osm_east,
+                    use_cache,
+                )
+                osm_data = osm_f.result()
+        else:
+            print("Fetching OSM data...")
+            osm_data = fetch_osm_data(
+                south=osm_south,
+                north=osm_north,
+                west=osm_west,
+                east=osm_east,
+                use_cache=use_cache,
+            )
+            ov_f = None
 
     # --- Terrain ---
     terrain_mesh = None
@@ -655,6 +718,11 @@ def main() -> None:
         export_stl(terrain_mesh, out_dir / "terrain.stl")
 
     # --- Buildings (skipped in route mode or when --no-buildings) ---
+    if not args.route and not args.no_buildings:
+        osm_data["buildings"] = supplement_buildings(
+            osm_data.get("buildings"), ov_f.result()
+        )
+
     buildings_mesh = None
     if not args.route and not args.no_buildings:
         print("\nExtruding buildings...")

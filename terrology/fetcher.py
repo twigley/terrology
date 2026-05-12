@@ -3,6 +3,7 @@ import math
 import geopandas as gpd
 import numpy as np
 import osmnx as ox
+import pandas as pd
 from scipy.ndimage import distance_transform_edt
 
 from terrology import cache as _cache
@@ -222,6 +223,116 @@ def fetch_elevation(
         _cache.save_elevation(south, north, west, east, _DEMTYPE, arr, header)
 
     return arr, header
+
+
+def fetch_overture_buildings(
+    south: float,
+    north: float,
+    west: float,
+    east: float,
+    use_cache: bool = True,
+) -> gpd.GeoDataFrame:
+    """Fetch Overture Maps building footprints for the given bbox."""
+    _EMPTY = gpd.GeoDataFrame(columns=["geometry", "height", "levels"], crs="EPSG:4326")
+
+    if use_cache:
+        cached = _cache.load_overture_buildings(south, north, west, east)
+        if cached is not None:
+            print(f"  (cache hit — {len(cached):,} Overture buildings)")
+            return cached
+
+    try:
+        import overturemaps
+    except ImportError:
+        print("  overturemaps not installed — skipping building supplement")
+        return _EMPTY
+
+    print("  Fetching Overture buildings...")
+    try:
+        # stac=True pre-filters parquet files via the STAC catalog so pyarrow only
+        # opens the handful of files that actually intersect the bbox, rather than
+        # scanning the entire global dataset.
+        reader = overturemaps.record_batch_reader(
+            "building", bbox=(west, south, east, north), stac=True
+        )
+        if reader is None:
+            print("  Overture reader returned None")
+            return _EMPTY
+        table = reader.read_all().select(["geometry", "height", "num_floors"])
+    except Exception as e:
+        print(f"  Overture fetch failed: {e}")
+        return _EMPTY
+
+    if len(table) == 0:
+        gdf = _EMPTY
+    else:
+        import shapely
+
+        geoms = shapely.from_wkb(table.column("geometry").to_pylist())
+        gdf = gpd.GeoDataFrame(
+            {
+                "geometry": geoms,
+                "height": table.column("height").to_pylist(),
+                "levels": table.column("num_floors").to_pylist(),
+            },
+            crs="EPSG:4326",
+        )
+        gdf = gdf[gdf.geometry.notna() & ~gdf.geometry.is_empty].reset_index(drop=True)
+
+    print(f"  {len(gdf):,} Overture buildings")
+    if use_cache:
+        _cache.save_overture_buildings(south, north, west, east, gdf)
+    return gdf
+
+
+def supplement_buildings(
+    osm_gdf: gpd.GeoDataFrame,
+    overture_gdf: gpd.GeoDataFrame,
+    overlap_threshold: float = 0.4,
+) -> gpd.GeoDataFrame:
+    """Return osm_gdf supplemented with Overture footprints not already covered by OSM."""
+    from shapely import STRtree
+
+    if overture_gdf is None or len(overture_gdf) == 0:
+        return osm_gdf
+    if osm_gdf is None or len(osm_gdf) == 0:
+        result = overture_gdf.copy()
+        if "building" not in result.columns:
+            result["building"] = "yes"
+        return result
+
+    osm_geoms = osm_gdf.geometry.values
+    tree = STRtree(osm_geoms)
+    ov_geoms = overture_gdf.geometry.values
+
+    keep = []
+    for i, geom in enumerate(ov_geoms):
+        if geom is None or geom.is_empty:
+            continue
+        candidates = tree.query(geom, predicate="intersects")
+        if len(candidates) == 0:
+            keep.append(i)
+            continue
+        area = geom.area
+        if area == 0:
+            continue
+        overlap = sum(geom.intersection(osm_geoms[j]).area for j in candidates)
+        if overlap / area < overlap_threshold:
+            keep.append(i)
+
+    if not keep:
+        return osm_gdf
+
+    new_rows = overture_gdf.iloc[keep].copy()
+    if "building" not in new_rows.columns:
+        new_rows["building"] = "yes"
+
+    combined = gpd.GeoDataFrame(
+        pd.concat([osm_gdf, new_rows], ignore_index=True),
+        crs=osm_gdf.crs,
+    )
+    print(f"  +{len(new_rows):,} Overture footprints added")
+    return combined
 
 
 def _glo_tile_url(tile_lat: int, tile_lon: int) -> str:
