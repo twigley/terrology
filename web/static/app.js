@@ -8,9 +8,10 @@ L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
 }).addTo(map);
 
 let pin = null;
-let square = null;
+let previewLayer = null;
 let currentLat = null;
 let currentLon = null;
+let currentShape = "square";
 
 // ── DOM refs ───────────────────────────────────────────────────────────────
 const searchInput   = document.getElementById("search");
@@ -20,12 +21,21 @@ const coordsText    = document.getElementById("coords-text");
 const noPinMsg      = document.getElementById("no-pin-msg");
 const radiusSlider  = document.getElementById("radius");
 const radiusVal     = document.getElementById("radius-val");
+const shapeControl  = document.getElementById("shape-control");
 const exagSlider    = document.getElementById("exag");
 const exagVal       = document.getElementById("exag-val");
+const bldgExagSlider = document.getElementById("bldg-exag");
+const bldgExagVal   = document.getElementById("bldg-exag-val");
 const colorsSelect  = document.getElementById("colors");
 const buildingsBox  = document.getElementById("buildings");
 const roofBox       = document.getElementById("roof-shapes");
 const contourInput  = document.getElementById("contour");
+const waterSlider   = document.getElementById("water-depth");
+const waterVal      = document.getElementById("water-val");
+const borderSlider  = document.getElementById("border-width");
+const borderVal     = document.getElementById("border-val");
+const demSelect     = document.getElementById("dem-source");
+const demHint       = document.getElementById("dem-hint");
 const scaleDisplay  = document.getElementById("scale-display");
 const minFeature    = document.getElementById("min-feature");
 const generateBtn   = document.getElementById("generate-btn");
@@ -35,11 +45,22 @@ const statusMsg     = document.getElementById("status-msg");
 const elapsedDiv    = document.getElementById("elapsed");
 const downloadBtn   = document.getElementById("download-btn");
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Preview geometry helpers ───────────────────────────────────────────────
 function squareBounds(lat, lon, r) {
     const dlat = r / 111111;
     const dlon = r / (111111 * Math.cos(lat * Math.PI / 180));
     return [[lat - dlat, lon - dlon], [lat + dlat, lon + dlon]];
+}
+
+function hexPoints(lat, lon, r) {
+    const pts = [];
+    for (let i = 0; i < 6; i++) {
+        const angle = i * 2 * Math.PI / 6;  // flat top + bottom
+        const dlat = r * Math.sin(angle) / 111111;
+        const dlon = r * Math.cos(angle) / (111111 * Math.cos(lat * Math.PI / 180));
+        pts.push([lat + dlat, lon + dlon]);
+    }
+    return pts;
 }
 
 function updateScale() {
@@ -49,17 +70,32 @@ function updateScale() {
     minFeature.textContent = Math.max(1, Math.round(r / 300));
 }
 
+function buildPreviewLayer(lat, lon, r, shape) {
+    if (shape === "circle") {
+        return L.circle([lat, lon], { radius: r, color: "#3b82f6", fillOpacity: 0.08, weight: 2 });
+    } else if (shape === "hexagon") {
+        return L.polygon(hexPoints(lat, lon, r), { color: "#3b82f6", fillOpacity: 0.08, weight: 2 });
+    } else {
+        return L.rectangle(squareBounds(lat, lon, r), { color: "#3b82f6", fillOpacity: 0.08, weight: 2 });
+    }
+}
+
+function refreshPreview() {
+    if (currentLat === null) return;
+    const r = parseInt(radiusSlider.value, 10);
+    if (previewLayer) { map.removeLayer(previewLayer); }
+    previewLayer = buildPreviewLayer(currentLat, currentLon, r, currentShape);
+    previewLayer.addTo(map);
+}
+
 function setPin(lat, lon) {
     currentLat = lat;
     currentLon = lon;
-    const r = parseInt(radiusSlider.value, 10);
-    const bounds = squareBounds(lat, lon, r);
 
     if (pin) pin.setLatLng([lat, lon]);
     else pin = L.marker([lat, lon]).addTo(map);
 
-    if (square) square.setBounds(bounds);
-    else square = L.rectangle(bounds, { color: "#3b82f6", fillOpacity: 0.08, weight: 2 }).addTo(map);
+    refreshPreview();
 
     coordsText.textContent = `${lat.toFixed(5)}, ${lon.toFixed(5)}`;
     coordsDisplay.classList.remove("hidden");
@@ -68,20 +104,41 @@ function setPin(lat, lon) {
     generateBtn.textContent = "Generate terrain map";
 }
 
-function updateSquare() {
-    const r = parseInt(radiusSlider.value, 10);
-    radiusVal.textContent = r;
-    if (square && currentLat !== null) square.setBounds(squareBounds(currentLat, currentLon, r));
-    updateScale();
-}
-
 // ── Map click ──────────────────────────────────────────────────────────────
 map.on("click", (e) => setPin(e.latlng.lat, e.latlng.lng));
 
-// ── Slider events ──────────────────────────────────────────────────────────
-radiusSlider.addEventListener("input", updateSquare);
+// ── Slider / control events ────────────────────────────────────────────────
+radiusSlider.addEventListener("input", () => {
+    radiusVal.textContent = radiusSlider.value;
+    refreshPreview();
+    updateScale();
+});
+
 exagSlider.addEventListener("input", () => {
     exagVal.textContent = parseFloat(exagSlider.value).toFixed(1);
+});
+
+bldgExagSlider.addEventListener("input", () => {
+    const v = parseFloat(bldgExagSlider.value);
+    bldgExagVal.textContent = v === 0 ? "match terrain" : `${v.toFixed(1)}×`;
+});
+
+waterSlider.addEventListener("input", () => {
+    waterVal.textContent = parseFloat(waterSlider.value).toFixed(1);
+});
+
+borderSlider.addEventListener("input", () => {
+    borderVal.textContent = parseInt(borderSlider.value, 10);
+});
+
+// ── Shape selector ─────────────────────────────────────────────────────────
+shapeControl.addEventListener("click", (e) => {
+    const btn = e.target.closest(".seg-btn");
+    if (!btn) return;
+    shapeControl.querySelectorAll(".seg-btn").forEach(b => b.classList.remove("active"));
+    btn.classList.add("active");
+    currentShape = btn.dataset.shape;
+    refreshPreview();
 });
 
 // ── Nominatim search ───────────────────────────────────────────────────────
@@ -172,15 +229,22 @@ generateBtn.addEventListener("click", async () => {
     downloadBtn.classList.add("hidden");
 
     const contourVal = contourInput.value ? parseFloat(contourInput.value) : null;
+    const bldgExagRaw = parseFloat(bldgExagSlider.value);
+
     const body = {
         lat: currentLat,
         lon: currentLon,
         radius: parseInt(radiusSlider.value, 10),
+        shape: currentShape,
         terrain_exag: parseFloat(exagSlider.value),
         colors: parseInt(colorsSelect.value, 10),
         no_buildings: !buildingsBox.checked,
         roof_shapes: roofBox.checked,
         contour_interval: contourVal,
+        building_exag: bldgExagRaw > 0 ? bldgExagRaw : null,
+        water_depth_mm: parseFloat(waterSlider.value),
+        border_width_mm: parseInt(borderSlider.value, 10),
+        dem_source: demSelect.value,
     };
 
     try {
@@ -211,3 +275,20 @@ generateBtn.addEventListener("click", async () => {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 updateScale();
+
+(async () => {
+    try {
+        const res = await fetch("/api/dem-sources");
+        const data = await res.json();
+        if (!data.key_configured) {
+            demHint.classList.remove("hidden");
+            Array.from(demSelect.options).forEach(opt => {
+                const src = data.sources.find(s => s.id === opt.value);
+                if (src && !src.available) {
+                    opt.disabled = true;
+                    opt.text += " (API key not configured)";
+                }
+            });
+        }
+    } catch { /* leave defaults */ }
+})();

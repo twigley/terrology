@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 
 import geopandas as gpd
 import numpy as np
@@ -7,6 +8,51 @@ import pandas as pd
 from scipy.ndimage import distance_transform_edt
 
 from terrology import cache as _cache
+
+_CONFIG_FILE = Path.home() / ".config" / "terrology" / "config"
+
+
+def _get_ot_api_key() -> str:
+    """Return the OpenTopography API key from env var or config file."""
+    import os
+
+    key = os.environ.get("OPENTOPOGRAPHY_API_KEY", "").strip()
+    if key:
+        return key
+    if _CONFIG_FILE.exists():
+        for line in _CONFIG_FILE.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == "OPENTOPOGRAPHY_API_KEY":
+                return v.strip()
+    return ""
+
+
+def ot_key_configured() -> bool:
+    """True if an OpenTopography API key is available."""
+    return bool(_get_ot_api_key())
+
+
+def save_ot_api_key(key: str) -> None:
+    """Persist the OpenTopography API key to the config file."""
+    _CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lines = _CONFIG_FILE.read_text().splitlines() if _CONFIG_FILE.exists() else []
+    new_lines, found = [], False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped.startswith("#") and "=" in stripped:
+            k, _, _ = stripped.partition("=")
+            if k.strip() == "OPENTOPOGRAPHY_API_KEY":
+                new_lines.append(f"OPENTOPOGRAPHY_API_KEY={key}")
+                found = True
+                continue
+        new_lines.append(line)
+    if not found:
+        new_lines.append(f"OPENTOPOGRAPHY_API_KEY={key}")
+    _CONFIG_FILE.write_text("\n".join(new_lines) + "\n")
+
 
 OSM_TAGS = {
     "buildings": {"building": True},
@@ -51,6 +97,18 @@ _GDAL_COG_ENV = {
     "GDAL_DISABLE_READDIR_ON_OPEN": "EMPTY_DIR",
     "GDAL_CACHEMAX": 512,
 }
+
+# OpenTopography API demtype codes for alternative sources.
+# All require a free API key: https://opentopography.org
+_OT_DEMTYPES = {
+    "srtm": "SRTMGL1",
+    "aw3d30": "AW3D30",
+}
+_OT_LABELS = {
+    "srtm": "SRTM GL1",
+    "aw3d30": "AW3D30",
+}
+DEM_SOURCES = ["glo30", "srtm", "aw3d30"]
 
 
 def fetch_osm_data(
@@ -147,8 +205,29 @@ def fetch_elevation(
     west: float,
     east: float,
     use_cache: bool = True,
+    dem_source: str = "glo30",
 ) -> tuple[np.ndarray, dict]:
-    """Fetch Copernicus GLO-30 elevation from public S3 COG tiles (no API key needed)."""
+    """Fetch elevation data for the given bbox.
+
+    dem_source choices:
+      'glo30'  — Copernicus GLO-30 via public S3 (no key needed, default)
+      'srtm'   — SRTM GL1 30 m via OpenTopography API (free key required)
+      'aw3d30' — ALOS AW3D30 30 m via OpenTopography API (free key required)
+    """
+    if dem_source == "glo30":
+        return _fetch_glo30(south, north, west, east, use_cache)
+    if dem_source in _OT_DEMTYPES:
+        return _fetch_opentopography(south, north, west, east, use_cache, dem_source)
+    raise ValueError(f"Unknown dem_source {dem_source!r}. Choose from: {DEM_SOURCES}")
+
+
+def _fetch_glo30(
+    south: float,
+    north: float,
+    west: float,
+    east: float,
+    use_cache: bool,
+) -> tuple[np.ndarray, dict]:
     _DEMTYPE = "GLO30"
 
     if use_cache:
@@ -221,6 +300,63 @@ def fetch_elevation(
 
     if use_cache:
         _cache.save_elevation(south, north, west, east, _DEMTYPE, arr, header)
+
+    return arr, header
+
+
+def _fetch_opentopography(
+    south: float,
+    north: float,
+    west: float,
+    east: float,
+    use_cache: bool,
+    dem_source: str,
+) -> tuple[np.ndarray, dict]:
+    """Fetch elevation via the OpenTopography global DEM API (free key required)."""
+    import urllib.error
+    import urllib.request
+
+    demtype = _OT_DEMTYPES[dem_source]
+    label = _OT_LABELS[dem_source]
+
+    if use_cache:
+        cached = _cache.load_elevation(south, north, west, east, demtype)
+        if cached is not None:
+            arr, header = cached
+            print(f"  (cache hit — {arr.shape[1]}x{arr.shape[0]} cells)")
+            return arr, header
+
+    api_key = _get_ot_api_key()
+    if not api_key:
+        raise RuntimeError(
+            f"DEM source '{dem_source}' requires an OpenTopography API key.\n"
+            f"  Save it once with:  uv run main.py --save-api-key <key>\n"
+            f"  Or set the env var: export OPENTOPOGRAPHY_API_KEY=<key>\n"
+            f"  Free key at: https://opentopography.org"
+        )
+
+    url = (
+        "https://portal.opentopography.org/API/globaldem"
+        f"?demtype={demtype}"
+        f"&south={south:.6f}&north={north:.6f}"
+        f"&west={west:.6f}&east={east:.6f}"
+        f"&outputFormat=AAIGrid&API_Key={api_key}"
+    )
+
+    print(f"  Downloading {label} via OpenTopography...")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as resp:  # noqa: S310
+            text = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", errors="replace")[:200]
+        raise RuntimeError(
+            f"OpenTopography returned HTTP {e.code} for {dem_source}: {body}"
+        ) from e
+
+    arr, header = _parse_aaigrid(text)
+
+    if use_cache:
+        _cache.save_elevation(south, north, west, east, demtype, arr, header)
 
     return arr, header
 

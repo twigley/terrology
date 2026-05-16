@@ -44,16 +44,34 @@ class JobParams(BaseModel):
     lat: float = Field(..., ge=-90, le=90)
     lon: float = Field(..., ge=-180, le=180)
     radius: float = Field(500, ge=100, le=5000)
+    shape: str = Field("square", pattern="^(square|circle|hexagon)$")
     terrain_exag: float = Field(2.0, ge=1.0, le=4.0)
     colors: int = Field(4, ge=1, le=7)
     no_buildings: bool = False
     roof_shapes: bool = False
     contour_interval: float | None = Field(None, ge=1)
+    border_width_mm: float = Field(0.0, ge=0.0, le=20.0)
+    water_depth_mm: float = Field(0.8, ge=0.0, le=5.0)
+    building_exag: float | None = Field(None, ge=0.5, le=5.0)
+    dem_source: str = Field("glo30", pattern="^(glo30|srtm|aw3d30)$")
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok"}
+
+
+@app.get("/api/dem-sources")
+async def dem_sources():
+    from terrology.fetcher import DEM_SOURCES, ot_key_configured
+
+    key_ok = ot_key_configured()
+    return {
+        "key_configured": key_ok,
+        "sources": [
+            {"id": s, "available": s == "glo30" or key_ok} for s in DEM_SOURCES
+        ],
+    }
 
 
 @app.get("/")

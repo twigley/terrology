@@ -65,7 +65,9 @@ def _clip_mesh_to_polygon(mesh, clip_poly_mm):
     height = (z_hi - z_lo) + 20.0  # 10 mm margin each side
     prism = trimesh.creation.extrude_polygon(clip_poly_mm, height=height)
     prism.apply_translation([0.0, 0.0, z_lo - 10.0])
-    return trimesh.boolean.intersection([mesh, prism], engine="manifold")
+    return trimesh.boolean.intersection(
+        [mesh, prism], engine="manifold", check_volume=False
+    )
 
 
 class MapBuilder:
@@ -206,7 +208,30 @@ class MapBuilder:
                 )
             )
 
+        # Build elevated geometry early so bridge/pier cells can be shielded from
+        # Gaussian smoothing.  The filter averages bridge deck pixels with adjacent
+        # river pixels in the DEM, pulling the bridge elevation down toward water
+        # level before the depression logic ever runs.  Saving and restoring those
+        # cells preserves the raw DEM deck elevation.
+        self._elevated_geoms = self._build_elevated_geoms(osm_data)
+        elevated_geoms = self._elevated_geoms
+
+        if elevated_geoms:
+            import shapely as _shapely
+            from shapely import STRtree as _STRtree
+
+            _pts_c = _shapely.points(gx.ravel(), gy.ravel())
+            _el_idx, _ = _STRtree(elevated_geoms).query(_pts_c, predicate="covered_by")
+            _saved_elev = elev.ravel()[_el_idx].copy() if len(_el_idx) else None
+        else:
+            _el_idx = None
+            _saved_elev = None
+
         elev = gaussian_filter(elev, sigma=1.0)
+
+        if _saved_elev is not None:
+            elev.ravel()[_el_idx] = _saved_elev
+
         self._min_elev = float(np.nanmin(elev))
 
         # Terrain interpolator (used by build_buildings for base heights)
@@ -229,10 +254,6 @@ class MapBuilder:
         elev_f = self._terrain_interp(
             np.column_stack([gy_f.ravel(), gx_f.ravel()])
         ).reshape(fine, fine)
-
-        # Pre-compute elevated geometry (piers, bridges) once, outside the parallel
-        # threads, to avoid concurrent _gdf_to_utm / to_crs() calls on shared GDFs.
-        elevated_geoms = self._build_elevated_geoms(osm_data)
 
         elev_mod = elev.copy()
         elev_f_mod = elev_f.copy()
@@ -381,6 +402,18 @@ class MapBuilder:
         Called once before the parallel depression threads so _gdf_to_utm is never
         invoked from multiple threads simultaneously on the same GeoDataFrame.
         """
+        # Bridge buffer must be at least as large as the coarsest grid cell so that
+        # bridge centerlines always capture at least one grid point on each side.
+        # Both the base grid (grid_size) and the fine colour grid (color_grid_size)
+        # use these same elevated_geoms, so we take the larger cell size.
+        cell_m = max(
+            (self.x_max - self.x_min) / self.grid_size,
+            (self.y_max - self.y_min) / self.grid_size,
+            (self.x_max - self.x_min) / self.color_grid_size,
+            (self.y_max - self.y_min) / self.color_grid_size,
+        )
+        bridge_buf = max(10.0, cell_m * 2.0)
+
         geoms: list = []
         pier_gdf = self._gdf_to_utm(osm_data, "piers")
         if pier_gdf is not None:
@@ -401,7 +434,21 @@ class MapBuilder:
                 for geom in bridges.geometry:
                     if geom is None or geom.is_empty:
                         continue
-                    geoms.append(geom.buffer(10.0))
+                    geoms.append(geom.buffer(bridge_buf))
+        aero_gdf = self._gdf_to_utm(osm_data, "aeroways")
+        if aero_gdf is not None and "bridge" in aero_gdf.columns:
+            aero_bridges = aero_gdf[
+                aero_gdf["bridge"].notna()
+                & (aero_gdf["bridge"] != "no")
+                & (aero_gdf["bridge"] != False)  # noqa: E712
+            ]
+            for geom in aero_bridges.geometry:
+                if geom is None or geom.is_empty:
+                    continue
+                if geom.geom_type in ("LineString", "MultiLineString"):
+                    geoms.append(geom.buffer(bridge_buf))
+                else:
+                    geoms.append(geom)
         return geoms
 
     def _apply_depressions(
@@ -425,33 +472,49 @@ class MapBuilder:
             idx, _ = STRtree(elevated_geoms).query(pts, predicate="covered_by")
             elevated_mask[idx] = True
 
-        # line_buf: buffer radius in metres for line geometries (0 = polygon, no buffer)
-        layers = [
-            ("roads", _ROAD_DEPRESS_M, 4.0),
-            ("railways", _ROAD_DEPRESS_M, 4.0),
-            ("waterways", water_depress_m, 2.0),
-            ("water_area", water_depress_m, 0.0),
-            ("water_landuse", water_depress_m, 0.0),
-        ]
-
-        for layer_name, depression_m, line_buf in layers:
+        # Roads/railways are applied per-layer (different depression amount).
+        for layer_name, line_buf in [("roads", 4.0), ("railways", 4.0)]:
             gdf_utm = self._gdf_to_utm(osm_data, layer_name)
             if gdf_utm is None:
                 continue
-
-            if layer_name in ("roads", "railways") and "bridge" in gdf_utm.columns:
+            if "bridge" in gdf_utm.columns:
                 keep = (
                     gdf_utm["bridge"].isna()
                     | (gdf_utm["bridge"] == "no")
                     | (gdf_utm["bridge"] == False)  # noqa: E712
                 )
                 gdf_utm = gdf_utm[keep]
+            geoms = []
+            for geom in gdf_utm.geometry:
+                if geom is None or geom.is_empty:
+                    continue
+                if geom.geom_type in ("LineString", "MultiLineString"):
+                    geom = geom.buffer(line_buf)
+                geoms.append(geom)
+            if not geoms:
+                continue
+            pt_idx, _ = STRtree(geoms).query(pts, predicate="within")
+            if len(pt_idx):
+                mask = np.zeros(len(pts), dtype=bool)
+                mask[pt_idx] = True
+                elev.ravel()[mask] -= _ROAD_DEPRESS_M
 
+        # All water layers share the same depression depth — accumulate into one mask
+        # so overlapping features (e.g. a river LineString + its area polygon) are
+        # only depressed once.
+        water_mask = np.zeros(len(pts), dtype=bool)
+
+        for layer_name, line_buf in [
+            ("waterways", 2.0),
+            ("water_area", 0.0),
+            ("water_landuse", 0.0),
+        ]:
+            gdf_utm = self._gdf_to_utm(osm_data, layer_name)
+            if gdf_utm is None:
+                continue
             if layer_name == "water_area" and "natural" in gdf_utm.columns:
                 # Bays are marine features; the sea polygon handles their depression.
-                # Keeping them here causes double-depression at bay boundaries.
                 gdf_utm = gdf_utm[gdf_utm["natural"] != "bay"]
-
             geoms = []
             for geom in gdf_utm.geometry:
                 if geom is None or geom.is_empty:
@@ -459,17 +522,11 @@ class MapBuilder:
                 if line_buf > 0 and geom.geom_type in ("LineString", "MultiLineString"):
                     geom = geom.buffer(line_buf)
                 geoms.append(geom)
-
             if not geoms:
                 continue
-
             pt_idx, _ = STRtree(geoms).query(pts, predicate="within")
             if len(pt_idx):
-                mask = np.zeros(len(pts), dtype=bool)
-                mask[pt_idx] = True
-                if layer_name not in ("roads", "railways"):
-                    mask &= ~elevated_mask
-                elev.ravel()[mask] -= depression_m
+                water_mask[pt_idx] = True
 
         # Sea depression — same depth as inland water.
         # _apply_sea_mask already zeroed sea cells to 0 m, so depressing by
@@ -479,14 +536,14 @@ class MapBuilder:
         if self._sea_poly is not None:
             pt_idx, _ = STRtree([self._sea_poly]).query(pts, predicate="covered_by")
             if len(pt_idx):
-                mask = np.zeros(len(pts), dtype=bool)
-                mask[pt_idx] = True
-                mask &= ~elevated_mask
-                elev.ravel()[mask] -= water_depress_m
+                water_mask[pt_idx] = True
         else:
             # Fallback when no OSM coastline polygon was found: depress by elevation threshold.
             if self._min_elev <= 1.5:
-                elev.ravel()[elev.ravel() <= 1.5] -= water_depress_m
+                water_mask[elev.ravel() <= 1.5] = True
+
+        water_mask &= ~elevated_mask
+        elev.ravel()[water_mask] -= water_depress_m
 
     # ------------------------------------------------------------------ #
     # Buildings
@@ -816,7 +873,7 @@ class MapBuilder:
             _paint_tree(rail_geoms, 6)
 
         # Paved polygon areas share the roads colour slot
-        for src in ("pedestrian_areas", "aeroways", "parking"):
+        for src in ("pedestrian_areas", "parking"):
             g = self._gdf_to_utm(osm_data, src)
             if g is not None:
                 road_geoms.extend(
@@ -827,7 +884,29 @@ class MapBuilder:
                     and geom.geom_type in ("Polygon", "MultiPolygon")
                 )
 
+        # Aeroways: polygon aprons/runways as-is; line taxiways/runways buffered
+        g = self._gdf_to_utm(osm_data, "aeroways")
+        if g is not None:
+            for geom in g.geometry:
+                if geom is None or geom.is_empty:
+                    continue
+                if geom.geom_type in ("Polygon", "MultiPolygon"):
+                    road_geoms.append(geom)
+                elif geom.geom_type in ("LineString", "MultiLineString"):
+                    road_geoms.append(geom.buffer(15.0))
+
         _paint_tree(road_geoms, 3)
+
+        # Bridges and elevated structures must never end up water-coloured: the 2D
+        # polygon containment tests above can't see elevation, so a bridge over a bay
+        # would otherwise get painted blue.  Re-set any water-painted faces that fall
+        # inside an elevated geometry back to terrain.
+        elevated = getattr(self, "_elevated_geoms", None)
+        if elevated:
+            el_idx, _ = STRtree(elevated).query(pts, predicate="covered_by")
+            if len(el_idx):
+                el_faces = top_indices[el_idx]
+                color_idx[el_faces[color_idx[el_faces] == 1]] = 0
 
         if contour_interval_m and contour_interval_m > 0:
             exag_mm = self.terrain_exag * self.mm_per_m

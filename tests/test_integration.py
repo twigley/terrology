@@ -294,38 +294,19 @@ def test_coastal_sea_produces_water_material(tmp_path):
 
 
 # ------------------------------------------------------------------ #
-# 9. Border + label
+# 9. Border
 # ------------------------------------------------------------------ #
 
 
-def test_border_and_label_appear_in_obj(tmp_path, patch_fetchers):
+def test_border_appears_in_obj(tmp_path, patch_fetchers):
     run_pipeline(
         **_FAST,
         output_dir=tmp_path,
         border_width_mm=6.0,
-        label="London",
         skip_stls=True,
     )
     obj = (tmp_path / "model.obj").read_text()
     assert "o border" in obj
-    assert "o scale_bar" in obj
-    assert "o label" in obj
-
-
-def test_border_adds_roads_material_for_scale_bar(tmp_path, patch_fetchers):
-    """scale_bar and label use the roads material — must appear in MTL without extra slot."""
-    run_pipeline(
-        **_FAST,
-        output_dir=tmp_path,
-        border_width_mm=6.0,
-        label="Test",
-        skip_stls=True,
-        colors=4,
-    )
-    mtl = (tmp_path / "model.mtl").read_text()
-    assert "newmtl roads" in mtl
-    # roads is the 4th default material (index 3) — no 5th slot should appear
-    assert "newmtl buildings" not in mtl
 
 
 # ------------------------------------------------------------------ #
@@ -531,7 +512,7 @@ def test_area_mode_obj_has_terrain_objects(tmp_path):
     assert "o terrain_top" in obj
 
 
-def test_area_mode_with_border_and_label(tmp_path):
+def test_area_mode_with_border(tmp_path):
     geojson = _write_geojson(tmp_path / "area.geojson")
     _run_main(
         [
@@ -546,15 +527,11 @@ def test_area_mode_with_border_and_label(tmp_path):
             "20",
             "--border-width",
             "6",
-            "--label",
-            "Area Test",
             "--no-cache",
         ]
     )
     obj = (tmp_path / "model.obj").read_text()
     assert "o border" in obj
-    assert "o scale_bar" in obj
-    assert "o label" in obj
 
 
 def test_area_mode_smooth_boundary(tmp_path):
@@ -800,7 +777,7 @@ def test_two_point_obj_has_terrain_objects(tmp_path):
     assert "o terrain_top" in obj
 
 
-def test_two_point_with_border_and_label(tmp_path):
+def test_two_point_with_border(tmp_path):
     _run_main(
         [
             "main.py",
@@ -815,15 +792,11 @@ def test_two_point_with_border_and_label(tmp_path):
             "20",
             "--border-width",
             "6",
-            "--label",
-            "London A-B",
             "--no-cache",
         ]
     )
     obj = (tmp_path / "model.obj").read_text()
     assert "o border" in obj
-    assert "o scale_bar" in obj
-    assert "o label" in obj
 
 
 def test_two_point_water_feature_in_mtl(tmp_path):

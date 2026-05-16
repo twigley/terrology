@@ -30,6 +30,7 @@ def run_pipeline(
     lat: float,
     lon: float,
     radius: float = 500,
+    clip_polygon_wgs84=None,
     scale: float | None = None,
     size: float = 190.0,
     terrain_exag: float = 2.0,
@@ -48,7 +49,7 @@ def run_pipeline(
     min_building_area: float | None = None,
     water_depth_mm: float = 0.8,
     border_width_mm: float = 0.0,
-    label: str | None = None,
+    dem_source: str = "glo30",
 ) -> Path:
     """Run the terrology pipeline for a single lat/lon point with a radius.
 
@@ -59,7 +60,7 @@ def run_pipeline(
 
     from pyproj import CRS, Transformer
 
-    from terrology.builder import MapBuilder, _utm_crs
+    from terrology.builder import MapBuilder, _clip_mesh_to_polygon, _utm_crs
     from terrology.exporter import export_3mf, export_color_stls, export_obj, export_stl
     from terrology.fetcher import (
         fetch_elevation,
@@ -80,8 +81,20 @@ def run_pipeline(
     from_utm = Transformer.from_crs(utm_crs, wgs84, always_xy=True)
 
     cx, cy = to_utm.transform(lon, lat)
-    x_min, x_max = cx - radius, cx + radius
-    y_min, y_max = cy - radius, cy + radius
+
+    if clip_polygon_wgs84 is not None:
+        from shapely.ops import transform as _shp_transform
+
+        area_poly_utm = _shp_transform(
+            lambda x, y: to_utm.transform(x, y), clip_polygon_wgs84
+        )
+        ab = area_poly_utm.bounds
+        x_min, y_min, x_max, y_max = ab[0], ab[1], ab[2], ab[3]
+    else:
+        area_poly_utm = None
+        x_min, x_max = cx - radius, cx + radius
+        y_min, y_max = cy - radius, cy + radius
+
     x_span_m = x_max - x_min
     y_span_m = y_max - y_min
 
@@ -131,6 +144,7 @@ def run_pipeline(
             west=osm_west - elev_pad,
             east=osm_east + elev_pad,
             use_cache=use_cache,
+            dem_source=dem_source,
         )
         ov_f = (
             executor.submit(
@@ -168,6 +182,7 @@ def run_pipeline(
         grid_size=actual_grid,
         color_depth_mm=color_depth_mm,
         color_grid_size=actual_color_grid,
+        clip_poly=area_poly_utm,
         building_exag=building_exag,
         min_building_area_m2=min_bldg_area,
         water_depth_mm=water_depth_mm,
@@ -187,6 +202,8 @@ def run_pipeline(
     if not no_buildings:
         print("\nExtruding buildings...")
         buildings_mesh = builder.build_buildings(osm_data, with_roof_shapes=roof_shapes)
+        if buildings_mesh is not None and builder.clip_poly_mm is not None:
+            buildings_mesh = _clip_mesh_to_polygon(buildings_mesh, builder.clip_poly_mm)
         if buildings_mesh is not None and not skip_stls:
             export_stl(buildings_mesh, out_dir / "buildings.stl")
 
@@ -215,29 +232,17 @@ def run_pipeline(
     parts = {k: v for k, v in parts.items() if v is not None}
 
     if border_width_mm > 0:
-        import trimesh as _trimesh
-
         from terrology.builder import _BASE_THICKNESS_MM
-        from terrology.decorations import (
-            make_frame_mesh,
-            make_label_meshes,
-            make_scale_bar_mesh,
-        )
+        from terrology.decorations import make_frame_mesh
 
         base_z = -_BASE_THICKNESS_MM
-        frame = make_frame_mesh(model_x_mm, model_y_mm, border_width_mm, base_z)
-        parts["border"] = frame
-
-        bar_mesh, bar_m = make_scale_bar_mesh(
-            builder.mm_per_m, model_x_mm, border_width_mm
+        parts["border"] = make_frame_mesh(
+            model_x_mm,
+            model_y_mm,
+            border_width_mm,
+            base_z,
+            clip_poly_mm=builder.clip_poly_mm,
         )
-        parts["scale_bar"] = bar_mesh
-        print(f"  Scale bar: {bar_m:,} m")
-
-        if label:
-            label_parts = make_label_meshes(label, model_x_mm, border_width_mm)
-            if label_parts:
-                parts["label"] = _trimesh.util.concatenate(label_parts)
 
     print("\nExporting OBJ...")
     export_obj(
@@ -415,14 +420,21 @@ def main() -> None:
         default=0.0,
         metavar="MM",
         help="Width in mm of the raised border frame around the model (default: 0 = none). "
-        "Recommended: 6–8 mm. Adds a scale bar automatically.",
+        "Recommended: 6–8 mm.",
     )
     parser.add_argument(
-        "--label",
+        "--save-api-key",
+        metavar="KEY",
         default=None,
-        metavar="TEXT",
-        help="Text label raised on the border strip (e.g. 'Southport\\n1:21000'). "
-        "Requires --border-width > 0. Use \\\\n for multiple lines.",
+        help="Save an OpenTopography API key to ~/.config/terrology/config and exit.",
+    )
+    parser.add_argument(
+        "--dem",
+        default="glo30",
+        choices=["glo30", "srtm", "aw3d30"],
+        help="Elevation source: glo30 (default, no key needed), srtm, aw3d30. "
+        "srtm and aw3d30 require OPENTOPOGRAPHY_API_KEY env var "
+        "(free at https://opentopography.org).",
     )
     parser.add_argument(
         "--no-cache", action="store_true", help="Ignore and overwrite cached downloads"
@@ -444,6 +456,13 @@ def main() -> None:
         "Uses a contrasting colour from the existing 4-slot palette.",
     )
     args = parser.parse_args()
+
+    if args.save_api_key:
+        from terrology.fetcher import _CONFIG_FILE, save_ot_api_key
+
+        save_ot_api_key(args.save_api_key)
+        print(f"API key saved to {_CONFIG_FILE}")
+        return
 
     if args.colors < 1 or args.colors > 7:
         print("ERROR: --colors must be between 1 and 7.")
@@ -527,7 +546,7 @@ def main() -> None:
                 min_building_area=args.min_building_area,
                 water_depth_mm=args.water_depth,
                 border_width_mm=args.border_width,
-                label=args.label,
+                dem_source=args.dem,
             )
             return
         lat2, lon2 = _resolve_location(args.to)
@@ -631,6 +650,7 @@ def main() -> None:
                 west=osm_west - elev_pad,
                 east=osm_east + elev_pad,
                 use_cache=use_cache,
+                dem_source=args.dem,
             )
             print(
                 f"  Elevation: {elevation.shape[1]} x {elevation.shape[0]} cells  "
@@ -657,6 +677,7 @@ def main() -> None:
                 west=osm_west - elev_pad,
                 east=osm_east + elev_pad,
                 use_cache=use_cache,
+                dem_source=args.dem,
             )
             ov_f = (
                 executor.submit(
@@ -729,6 +750,10 @@ def main() -> None:
         buildings_mesh = builder.build_buildings(
             osm_data, with_roof_shapes=args.roof_shapes
         )
+        if buildings_mesh is not None and builder.clip_poly_mm is not None:
+            from terrology.builder import _clip_mesh_to_polygon
+
+            buildings_mesh = _clip_mesh_to_polygon(buildings_mesh, builder.clip_poly_mm)
         if buildings_mesh is not None:
             export_stl(buildings_mesh, out_dir / "buildings.stl")
 
@@ -772,30 +797,17 @@ def main() -> None:
     parts = {k: v for k, v in parts.items() if v is not None}
 
     if args.border_width > 0:
-        import trimesh as _trimesh
-
         from terrology.builder import _BASE_THICKNESS_MM
-        from terrology.decorations import (
-            make_frame_mesh,
-            make_label_meshes,
-            make_scale_bar_mesh,
-        )
+        from terrology.decorations import make_frame_mesh
 
         base_z = -_BASE_THICKNESS_MM
         parts["border"] = make_frame_mesh(
-            model_x_mm, model_y_mm, args.border_width, base_z
+            model_x_mm,
+            model_y_mm,
+            args.border_width,
+            base_z,
+            clip_poly_mm=builder.clip_poly_mm,
         )
-
-        bar_mesh, bar_m = make_scale_bar_mesh(
-            1000.0 / scale, model_x_mm, args.border_width
-        )
-        parts["scale_bar"] = bar_mesh
-        print(f"  Scale bar: {bar_m:,} m")
-
-        if args.label:
-            label_parts = make_label_meshes(args.label, model_x_mm, args.border_width)
-            if label_parts:
-                parts["label"] = _trimesh.util.concatenate(label_parts)
 
     print("\nExporting OBJ...")
     export_obj(

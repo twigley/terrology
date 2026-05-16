@@ -130,6 +130,37 @@ h1 {
     font-weight: 500;
 }
 
+/* Segmented shape control */
+.seg-control {
+    display: flex;
+    border: 1.5px solid #ddd;
+    border-radius: 6px;
+    overflow: hidden;
+}
+.seg-btn {
+    flex: 1;
+    padding: 7px 0;
+    background: #fafafa;
+    color: #555;
+    border: none;
+    border-right: 1.5px solid #ddd;
+    font-size: .82rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background .12s, color .12s;
+}
+.seg-btn:last-child { border-right: none; }
+.seg-btn:hover { background: #f3f4f6; }
+.seg-btn.active { background: #3b82f6; color: #fff; }
+
+/* Small hint below a field */
+.field-hint {
+    display: block;
+    font-size: .72rem;
+    color: #aaa;
+    margin-top: 3px;
+}
+
 /* Advanced section */
 details.advanced {
     margin-bottom: 10px;

@@ -14,7 +14,8 @@ Always use `uv`. Never pip-install or suggest requirements.txt.
 |---|---|
 | `main.py` | CLI entry point — argument parsing, orchestration |
 | `terrology/builder.py` | `MapBuilder` — terrain mesh, buildings, colouring, clipping |
-| `terrology/fetcher.py` | OSM + OpenTopography downloads, caching |
+| `terrology/fetcher.py` | OSM + elevation downloads, caching |
+| `terrology/decorations.py` | Border frame mesh (`make_frame_mesh`) |
 | `terrology/exporter.py` | STL, OBJ+MTL output |
 | `terrology/cache.py` | Disk cache under `~/.cache/3dmap/` |
 | `docs/bambu_3mf_format.md` | Reverse-engineered Bambu Studio 3MF spec |
@@ -60,9 +61,27 @@ uv run ruff format .
 
 Write tests before or alongside new code, not after.
 
+## Elevation sources
+
+GLO-30 is the default — fetched directly from the Copernicus S3 bucket, no API key needed.
+AW3D30 and SRTM use the OpenTopography API and require a free key stored in
+`~/.config/terrology/config`:
+
+```
+OPENTOPOGRAPHY_API_KEY=<your-key>
+```
+
+Or save it once with: `uv run main.py --save-api-key <key>`
+
+**AW3D30 gives better bridge deck elevations** — GLO-30 (radar) sometimes records bridge
+decks at river-surface level; AW3D30 (optical stereo) measures the visible deck surface.
+Use `--dem aw3d30` when bridge accuracy matters.
+
 ## Known issues / gotchas
 
 - Stale cache: a failed OSM layer fetch is cached as empty. Use `--no-cache` to re-fetch.
 - Water missing in `--area` mode: reservoir/lake may be outside the drawn polygon.
 - `--smooth-boundary` applies Chaikin corner-cutting to the GeoJSON polygon before clipping —
   each iteration pulls vertices slightly inward so don't exceed ~6.
+- Bridge deck elevation: GLO-30 records some bridges at river level (radar sees water through
+  deck gaps). Use `--dem aw3d30` to fix this — confirmed better for UK road bridges.

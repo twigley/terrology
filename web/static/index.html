@@ -33,8 +33,18 @@
 
     <!-- Radius -->
     <div class="field">
-        <label>Half-width — <span id="radius-val">500</span> m (square model)</label>
+        <label>Half-width — <span id="radius-val">500</span> m</label>
         <input id="radius" type="range" min="100" max="5000" step="50" value="500"/>
+    </div>
+
+    <!-- Shape -->
+    <div class="field">
+        <label>Map shape</label>
+        <div class="seg-control" id="shape-control">
+            <button class="seg-btn active" data-shape="square">Square</button>
+            <button class="seg-btn" data-shape="circle">Circle</button>
+            <button class="seg-btn" data-shape="hexagon">Hexagon</button>
+        </div>
     </div>
 
     <!-- Exaggeration -->
@@ -60,6 +70,7 @@
     <!-- Advanced -->
     <details class="advanced">
         <summary>Advanced options</summary>
+
         <div class="field">
             <label class="checkbox-label">
                 <input id="buildings" type="checkbox" checked/>
@@ -73,8 +84,31 @@
             </label>
         </div>
         <div class="field">
+            <label>Building exaggeration — <span id="bldg-exag-val">match terrain</span></label>
+            <input id="bldg-exag" type="range" min="0" max="4.0" step="0.5" value="0"/>
+            <span class="field-hint">0 = same as terrain exaggeration</span>
+        </div>
+        <div class="field">
             <label>Contour interval (metres, optional)</label>
             <input id="contour" type="number" min="1" step="1" placeholder="e.g. 50"/>
+        </div>
+        <div class="field">
+            <label>Water depth — <span id="water-val">0.8</span> mm</label>
+            <input id="water-depth" type="range" min="0" max="3.0" step="0.1" value="0.8"/>
+        </div>
+        <div class="field">
+            <label>Border width — <span id="border-val">0</span> mm</label>
+            <input id="border-width" type="range" min="0" max="15" step="1" value="0"/>
+            <span class="field-hint">0 = no border. Recommended: 6–8 mm.</span>
+        </div>
+        <div class="field">
+            <label>Elevation source</label>
+            <select id="dem-source">
+                <option value="glo30" selected>Copernicus GLO-30 (default)</option>
+                <option value="aw3d30">ALOS AW3D30 — optical, better bridge decks</option>
+                <option value="srtm">SRTM GL1 — radar, similar to GLO-30</option>
+            </select>
+            <span id="dem-hint" class="field-hint hidden">AW3D30 and SRTM require an <a href="https://opentopography.org" target="_blank">OpenTopography</a> API key — run <code>uv run main.py --save-api-key &lt;key&gt;</code> on the server.</span>
         </div>
     </details>
 
