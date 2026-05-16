@@ -49,17 +49,28 @@ def run_job(job_id: str, params: dict) -> None:
         output_dir=out_dir,
     )
     try:
-        shape = params.get("shape", "square")
         clip_polygon_wgs84 = None
-        if shape != "square":
-            clip_polygon_wgs84 = _make_shape_polygon(
-                params["lat"], params["lon"], params["radius"], shape
-            )
+        if params.get("polygon"):
+            from shapely.geometry import Polygon as _Polygon
+
+            coords = params["polygon"]
+            clip_polygon_wgs84 = _Polygon([(c[0], c[1]) for c in coords])
+            centroid = clip_polygon_wgs84.centroid
+            lat = centroid.y
+            lon = centroid.x
+            radius = params.get("radius", 500)
+        else:
+            lat = params["lat"]
+            lon = params["lon"]
+            radius = params["radius"]
+            shape = params.get("shape", "square")
+            if shape != "square":
+                clip_polygon_wgs84 = _make_shape_polygon(lat, lon, radius, shape)
 
         run_pipeline(
-            lat=params["lat"],
-            lon=params["lon"],
-            radius=params["radius"],
+            lat=lat,
+            lon=lon,
+            radius=radius,
             clip_polygon_wgs84=clip_polygon_wgs84,
             terrain_exag=params["terrain_exag"],
             colors=params["colors"],

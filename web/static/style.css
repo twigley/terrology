@@ -130,6 +130,15 @@ h1 {
     font-weight: 500;
 }
 
+.clear-link {
+    font-size: .75rem;
+    color: #888;
+    text-decoration: underline;
+    cursor: pointer;
+    margin-left: 8px;
+}
+.clear-link:hover { color: #ef4444; }
+
 /* Segmented shape control */
 .seg-control {
     display: flex;
@@ -258,8 +267,6 @@ button.primary:disabled { opacity: .45; cursor: not-allowed; }
     margin-bottom: 10px;
 }
 
-#download-btn { margin-bottom: 0; }
-
 /* Spinner */
 .spinner {
     display: inline-block;
@@ -285,6 +292,78 @@ button.primary:disabled { opacity: .45; cursor: not-allowed; }
     line-height: 1.5;
 }
 #attr a { color: #93c5fd; }
+
+/* Download + preview side-by-side */
+.action-row { display: flex; gap: 8px; }
+.action-row .btn,
+.action-row button { flex: 1; margin-bottom: 0; }
+
+button.secondary {
+    display: block;
+    width: 100%;
+    padding: 10px;
+    background: #f3f4f6;
+    color: #374151;
+    border: 1.5px solid #d1d5db;
+    border-radius: 8px;
+    font-size: .92rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background .15s;
+}
+button.secondary:hover { background: #e5e7eb; }
+
+/* 3D preview modal */
+#preview-modal {
+    position: fixed;
+    inset: 0;
+    background: #111827;
+    z-index: 9000;
+    display: flex;
+    flex-direction: column;
+}
+#preview-modal.hidden { display: none !important; }
+
+#preview-canvas { flex: 1; display: block; width: 100%; }
+
+#preview-close {
+    position: absolute;
+    top: 12px;
+    right: 16px;
+    color: #fff;
+    cursor: pointer;
+    font-size: .88rem;
+    font-weight: 600;
+    z-index: 9001;
+    background: rgba(0,0,0,.5);
+    padding: 5px 12px;
+    border-radius: 6px;
+    border: none;
+}
+#preview-close:hover { background: rgba(0,0,0,.75); }
+
+#preview-loading {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255,255,255,.6);
+    font-size: 1rem;
+    pointer-events: none;
+}
+#preview-loading.hidden { display: none; }
+
+#preview-hint {
+    position: absolute;
+    bottom: 14px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(255,255,255,.35);
+    font-size: .75rem;
+    pointer-events: none;
+    white-space: nowrap;
+}
 
 @media (max-width: 640px) {
     body { flex-direction: column-reverse; }

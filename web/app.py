@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import os
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
@@ -10,7 +11,7 @@ from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from slowapi import Limiter, _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
@@ -34,6 +35,8 @@ async def lifespan(app: FastAPI):
     task.cancel()
 
 
+_RATE_LIMIT = "5/hour" if not os.getenv("TERROLOGY_NO_RATE_LIMIT") else "10000/hour"
+
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Terrology", lifespan=lifespan)
 app.state.limiter = limiter
@@ -41,10 +44,11 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 
 class JobParams(BaseModel):
-    lat: float = Field(..., ge=-90, le=90)
-    lon: float = Field(..., ge=-180, le=180)
+    lat: float | None = Field(None, ge=-90, le=90)
+    lon: float | None = Field(None, ge=-180, le=180)
     radius: float = Field(500, ge=100, le=5000)
     shape: str = Field("square", pattern="^(square|circle|hexagon)$")
+    polygon: list[list[float]] | None = None  # [[lng, lat], ...] GeoJSON ring
     terrain_exag: float = Field(2.0, ge=1.0, le=4.0)
     colors: int = Field(4, ge=1, le=7)
     no_buildings: bool = False
@@ -54,6 +58,14 @@ class JobParams(BaseModel):
     water_depth_mm: float = Field(0.8, ge=0.0, le=5.0)
     building_exag: float | None = Field(None, ge=0.5, le=5.0)
     dem_source: str = Field("glo30", pattern="^(glo30|srtm|aw3d30)$")
+
+    @model_validator(mode="after")
+    def check_location(self):
+        if self.polygon is None and (self.lat is None or self.lon is None):
+            raise ValueError("Provide either polygon or lat+lon")
+        if self.polygon is not None and len(self.polygon) < 3:
+            raise ValueError("Polygon must have at least 3 points")
+        return self
 
 
 @app.get("/health")
@@ -80,7 +92,7 @@ async def index():
 
 
 @app.post("/api/jobs")
-@limiter.limit("5/hour")
+@limiter.limit(_RATE_LIMIT)
 async def create_job(
     request: Request,
     params: JobParams,
@@ -124,6 +136,19 @@ async def download_job(job_id: str, background_tasks: BackgroundTasks):
             "Content-Disposition": f"attachment; filename=terrology_{job_id[:8]}.zip"
         },
     )
+
+
+@app.get("/api/jobs/{job_id}/files/{filename}")
+async def get_job_file(job_id: str, filename: str):
+    if filename not in ("model.obj", "model.mtl"):
+        raise HTTPException(status_code=404, detail="File not found")
+    job = store.get(job_id)
+    if job is None or job.status != JobStatus.READY:
+        raise HTTPException(status_code=404, detail="Job not ready or not found")
+    p = job.output_dir / filename
+    if not p.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(p)
 
 
 app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")

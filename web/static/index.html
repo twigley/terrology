@@ -6,7 +6,16 @@
     <title>Terrology — 3D Terrain Map Generator</title>
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
           integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin=""/>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css"/>
     <link rel="stylesheet" href="/static/style.css"/>
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://unpkg.com/three@0.158.0/build/three.module.js",
+            "three/addons/": "https://unpkg.com/three@0.158.0/examples/jsm/"
+        }
+    }
+    </script>
 </head>
 <body>
 <div id="map"></div>
@@ -24,28 +33,44 @@
         </div>
     </div>
 
+    <!-- Mode toggle -->
+    <div class="field">
+        <label>Map area</label>
+        <div class="seg-control" id="mode-control">
+            <button class="seg-btn active" data-mode="pin">Centre + radius</button>
+            <button class="seg-btn" data-mode="area">Draw polygon</button>
+        </div>
+    </div>
+
     <!-- Pin status -->
     <div id="coords-display" class="field hidden">
-        <label>Selected location</label>
+        <label id="coords-label">Selected location</label>
         <span id="coords-text">—</span>
+        <a id="clear-polygon" class="clear-link hidden" href="#">Clear</a>
     </div>
     <p id="no-pin-msg" class="hint">Click the map to set a location</p>
 
-    <!-- Radius -->
-    <div class="field">
-        <label>Half-width — <span id="radius-val">500</span> m</label>
-        <input id="radius" type="range" min="100" max="5000" step="50" value="500"/>
-    </div>
+    <!-- Pin-only controls -->
+    <div id="pin-options">
+        <!-- Radius -->
+        <div class="field">
+            <label>Half-width — <span id="radius-val">500</span> m</label>
+            <input id="radius" type="range" min="100" max="5000" step="50" value="500"/>
+        </div>
 
-    <!-- Shape -->
-    <div class="field">
-        <label>Map shape</label>
-        <div class="seg-control" id="shape-control">
-            <button class="seg-btn active" data-shape="square">Square</button>
-            <button class="seg-btn" data-shape="circle">Circle</button>
-            <button class="seg-btn" data-shape="hexagon">Hexagon</button>
+        <!-- Shape -->
+        <div class="field">
+            <label>Map shape</label>
+            <div class="seg-control" id="shape-control">
+                <button class="seg-btn active" data-shape="square">Square</button>
+                <button class="seg-btn" data-shape="circle">Circle</button>
+                <button class="seg-btn" data-shape="hexagon">Hexagon</button>
+            </div>
         </div>
     </div>
+
+    <!-- Draw-mode hint (replaces no-pin-msg in draw mode) -->
+    <p id="draw-hint" class="hint hidden">Click the map to add vertices — double-click to close the polygon</p>
 
     <!-- Exaggeration -->
     <div class="field">
@@ -125,7 +150,10 @@
             <span id="status-msg"></span>
         </div>
         <div id="elapsed"></div>
-        <a id="download-btn" class="btn primary hidden" href="#">Download map (.zip)</a>
+        <div class="action-row">
+            <a id="download-btn" class="btn primary hidden" href="#">Download (.zip)</a>
+            <button id="preview-btn" class="secondary hidden">Preview 3D</button>
+        </div>
     </div>
 
     <p id="attr">
@@ -135,8 +163,16 @@
 </div><!-- /panel-scroll -->
 </div>
 
+<div id="preview-modal" class="hidden">
+    <canvas id="preview-canvas"></canvas>
+    <div id="preview-loading">Loading model…</div>
+    <button id="preview-close">✕ Close</button>
+    <div id="preview-hint">Drag to rotate · Scroll to zoom · Right-drag to pan</div>
+</div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
         integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
+<script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
 <script src="/static/app.js"></script>
+<script type="module" src="/static/preview.js"></script>
 </body>
 </html>

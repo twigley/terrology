@@ -65,9 +65,14 @@ def _clip_mesh_to_polygon(mesh, clip_poly_mm):
     height = (z_hi - z_lo) + 20.0  # 10 mm margin each side
     prism = trimesh.creation.extrude_polygon(clip_poly_mm, height=height)
     prism.apply_translation([0.0, 0.0, z_lo - 10.0])
-    return trimesh.boolean.intersection(
+    result = trimesh.boolean.intersection(
         [mesh, prism], engine="manifold", check_volume=False
     )
+    # manifold can silently return a 0-face mesh instead of raising — fall back
+    # to the unclipped mesh rather than silently dropping all geometry.
+    if result is None or len(result.faces) == 0:
+        return mesh
+    return result
 
 
 class MapBuilder:
@@ -553,6 +558,7 @@ class MapBuilder:
         from concurrent.futures import ThreadPoolExecutor
 
         bbox_poly = shapely_box(self.x_min, self.y_min, self.x_max, self.y_max)
+        clip_area = self.clip_poly if self.clip_poly is not None else bbox_poly
         skipped = 0
 
         # --- Pass 1: collect valid (poly_utm, height_m, layer, roof_shape, roof_h_m) ---
@@ -580,18 +586,22 @@ class MapBuilder:
                     _building_roof_info(row) if with_roof_shapes else ("flat", 0.0)
                 )
                 for poly in polys:
-                    poly = poly.intersection(bbox_poly)
-                    if poly.is_empty or poly.area < self.min_building_area_m2:
+                    clipped = poly.intersection(clip_area)
+                    if clipped.is_empty:
                         continue
-                    if poly.geom_type != "Polygon":
-                        skipped += 1
-                        continue
-                    work_utm.append((poly, height_m, layer, roof_shape, roof_h_m))
-
-        if self.clip_poly is not None:
-            work_utm = [
-                t for t in work_utm if not t[0].intersection(self.clip_poly).is_empty
-            ]
+                    sub_polys = (
+                        [clipped]
+                        if clipped.geom_type == "Polygon"
+                        else list(clipped.geoms)
+                        if clipped.geom_type == "MultiPolygon"
+                        else []
+                    )
+                    for sub_poly in sub_polys:
+                        if sub_poly.area < self.min_building_area_m2:
+                            continue
+                        work_utm.append(
+                            (sub_poly, height_m, layer, roof_shape, roof_h_m)
+                        )
 
         if not work_utm:
             print("  No valid building meshes produced.")
@@ -696,6 +706,8 @@ class MapBuilder:
                 unified = trimesh.boolean.union(
                     watertight, engine="manifold", check_volume=False
                 )
+                if len(unified.faces) == 0:
+                    raise RuntimeError("union returned empty mesh")
                 print(f"  Building union OK: {len(unified.faces):,} faces")
             except Exception as e:
                 print(

@@ -60,7 +60,7 @@ def run_pipeline(
 
     from pyproj import CRS, Transformer
 
-    from terrology.builder import MapBuilder, _clip_mesh_to_polygon, _utm_crs
+    from terrology.builder import MapBuilder, _utm_crs
     from terrology.exporter import export_3mf, export_color_stls, export_obj, export_stl
     from terrology.fetcher import (
         fetch_elevation,
@@ -202,8 +202,6 @@ def run_pipeline(
     if not no_buildings:
         print("\nExtruding buildings...")
         buildings_mesh = builder.build_buildings(osm_data, with_roof_shapes=roof_shapes)
-        if buildings_mesh is not None and builder.clip_poly_mm is not None:
-            buildings_mesh = _clip_mesh_to_polygon(buildings_mesh, builder.clip_poly_mm)
         if buildings_mesh is not None and not skip_stls:
             export_stl(buildings_mesh, out_dir / "buildings.stl")
 
@@ -263,7 +261,8 @@ def run_pipeline(
     print("\nDone!")
     for name, mesh in parts.items():
         e = mesh.extents  # type: ignore[union-attr]
-        print(f"  {name:<12} {e[0]:.1f} x {e[1]:.1f} x {e[2]:.1f} mm")
+        if e is not None:
+            print(f"  {name:<12} {e[0]:.1f} x {e[1]:.1f} x {e[2]:.1f} mm")
 
     return out_dir
 
@@ -750,10 +749,6 @@ def main() -> None:
         buildings_mesh = builder.build_buildings(
             osm_data, with_roof_shapes=args.roof_shapes
         )
-        if buildings_mesh is not None and builder.clip_poly_mm is not None:
-            from terrology.builder import _clip_mesh_to_polygon
-
-            buildings_mesh = _clip_mesh_to_polygon(buildings_mesh, builder.clip_poly_mm)
         if buildings_mesh is not None:
             export_stl(buildings_mesh, out_dir / "buildings.stl")
 
@@ -829,7 +824,8 @@ def main() -> None:
     print("\nDone!")
     for name, mesh in parts.items():
         e = mesh.extents  # type: ignore[union-attr]
-        print(f"  {name:<12} {e[0]:.1f} x {e[1]:.1f} x {e[2]:.1f} mm")
+        if e is not None:
+            print(f"  {name:<12} {e[0]:.1f} x {e[1]:.1f} x {e[2]:.1f} mm")
 
 
 def _limit_colors(face_colors, n_total: int):
