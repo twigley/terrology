@@ -82,7 +82,7 @@ def run_job(job_id: str, params: dict) -> None:
             building_exag=params.get("building_exag"),
             dem_source=params.get("dem_source", "glo30"),
             output_dir=out_dir,
-            color_grid_size=600,
+            color_grid_size=800,
             skip_stls=True,
         )
         store.update(job_id, status=JobStatus.READY)

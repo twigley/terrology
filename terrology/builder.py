@@ -757,13 +757,31 @@ class MapBuilder:
         # mesh are never used by the exporter but would otherwise inflate query count ~2×.
         top_mask = terrain_mesh.face_normals[:, 2] > 0.5
         top_indices = np.where(top_mask)[0]
-        centroids = terrain_mesh.triangles_center[top_mask]
-        cx_utm = centroids[:, 0] / self.mm_per_m + self.x_min
-        cy_utm = centroids[:, 1] / self.mm_per_m + self.y_min
+
+        # 7 sample points per face: centroid + 3 vertices + 3 edge midpoints.
+        # Majority vote (>= 4/7) gives smoother, polygon-aligned boundaries vs centroid-only.
+        verts_mm = terrain_mesh.vertices[terrain_mesh.faces[top_indices]]  # (n, 3, 3)
+        centroids = verts_mm.mean(axis=1)  # (n, 3)
+        sample_mm = np.concatenate(
+            [
+                centroids[:, np.newaxis, :],  # centroid
+                verts_mm,  # 3 vertices
+                (verts_mm[:, [0, 1, 2]] + verts_mm[:, [1, 2, 0]]) / 2,  # 3 midpoints
+            ],
+            axis=1,
+        )  # (n, 7, 3)
+        n_top = len(top_indices)
+        sample_utm_x = sample_mm[:, :, 0].ravel() / self.mm_per_m + self.x_min
+        sample_utm_y = sample_mm[:, :, 1].ravel() / self.mm_per_m + self.y_min
+        pts_multi = shapely.points(sample_utm_x, sample_utm_y)  # length n_top * 7
+
+        # Keep centroid-only points for large-area queries (sea, elevation, bridges)
+        cx_utm = sample_utm_x[::7]
+        cy_utm = sample_utm_y[::7]
         pts = shapely.points(cx_utm, cy_utm)
 
         def _paint_tree(geoms: list, cidx: int) -> None:
-            """Paint upward-facing faces whose centroid falls inside any geometry."""
+            """Paint faces where a majority (>=4/7) of sample points fall inside any geometry."""
             valid = [
                 g
                 for g in geoms
@@ -773,9 +791,13 @@ class MapBuilder:
             ]
             if not valid:
                 return
-            pt_idx, _ = STRtree(valid).query(pts, predicate="within")
-            if len(pt_idx):
-                color_idx[top_indices[pt_idx]] = cidx
+            pt_idx, _ = STRtree(valid).query(pts_multi, predicate="within")
+            if not len(pt_idx):
+                return
+            votes = np.bincount(pt_idx // 7, minlength=n_top)
+            painted = np.where(votes >= 1)[0]
+            if len(painted):
+                color_idx[top_indices[painted]] = cidx
 
         # Paint in ascending priority (later overwrites earlier):
         # sand → sea → parks → water → roads

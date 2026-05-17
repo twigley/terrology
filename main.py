@@ -40,7 +40,7 @@ def run_pipeline(
     roof_shapes: bool = False,
     contour_interval: float | None = None,
     grid_size: int = 200,
-    color_grid_size: int = 400,
+    color_grid_size: int = 800,
     color_depth_mm: float = 1.5,
     nozzle: float = 0.4,
     output_dir: "str | Path" = "output",
@@ -345,8 +345,8 @@ def main() -> None:
     parser.add_argument(
         "--color-grid-size",
         type=int,
-        default=400,
-        help="Color surface mesh resolution NxN (default: 400). Higher = finer roads/paths. "
+        default=800,
+        help="Color surface mesh resolution NxN (default: 800). Higher = finer roads/paths. "
         "Independent of --grid-size so the bulk mesh stays light.",
     )
     parser.add_argument(
