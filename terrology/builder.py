@@ -232,7 +232,7 @@ class MapBuilder:
             _el_idx = None
             _saved_elev = None
 
-        elev = gaussian_filter(elev, sigma=1.0)
+        elev = gaussian_filter(elev, sigma=0.5)
 
         if _saved_elev is not None:
             elev.ravel()[_el_idx] = _saved_elev
@@ -382,9 +382,16 @@ class MapBuilder:
                     poly_votes[i] += 1
 
         if poly_votes:
-            best_idx = poly_votes.most_common(1)[0][0]
-            print("  sea polygon: identified by coastline direction")
-            return sea_candidates[best_idx]
+            voted = [
+                sea_candidates[i]
+                for i in range(len(sea_candidates))
+                if poly_votes[i] > 0
+            ]
+            sea_poly = unary_union(voted) if len(voted) > 1 else voted[0]
+            print(
+                f"  sea polygon: identified by coastline direction ({len(voted)} segment(s))"
+            )
+            return sea_poly
 
         # No directional votes — fall back to lowest centroid elevation.
         if self._terrain_interp is None:
