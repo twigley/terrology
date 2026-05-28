@@ -28,9 +28,22 @@
 
 ---
 
-## Requirements
+## Installation
 
-- [uv](https://docs.astral.sh/uv/)
+Install [uv](https://docs.astral.sh/uv/), then:
+
+```bash
+uv tool install git+https://github.com/twigley/terrology
+terrology "Snowdon" --radius 500
+```
+
+Or clone and run directly:
+
+```bash
+git clone https://github.com/twigley/terrology
+cd terrology
+terrology "Snowdon" --radius 500
+```
 
 The default elevation source (`glo30`) requires no API key. The `srtm` and `aw3d30` sources require a free [OpenTopography API key](https://portal.opentopography.org/requestApiKey):
 
@@ -38,9 +51,9 @@ The default elevation source (`glo30`) requires no API key. The `srtm` and `aw3d
 export OPENTOPOGRAPHY_API_KEY=your_key
 ```
 
-Save it once so you don't have to set it each session:
+Or save it once:
 ```bash
-uv run main.py --save-api-key <your_key>
+terrology --save-api-key <your_key>
 ```
 
 ---
@@ -48,34 +61,34 @@ uv run main.py --save-api-key <your_key>
 ## Usage
 
 ```bash
-uv run main.py <location> [options]
+terrology <location> [options]
 ```
 
 ### Modes
 
 **Single location** — square map centred on a point:
 ```bash
-uv run main.py "Canary Wharf, London" --radius 500
-uv run main.py 51.5074,-0.1278 --radius 600 --scale 4000
+terrology "Canary Wharf, London" --radius 500
+terrology 51.5074,-0.1278 --radius 600 --scale 4000
 ```
 
 **Two locations** — rectangular map spanning both points (each near an edge):
 ```bash
-uv run main.py "51.5074,-0.1278" --to "51.5155,-0.0753"
-uv run main.py "Edinburgh Castle" --to "Arthur's Seat, Edinburgh" --buffer 0.08
+terrology "51.5074,-0.1278" --to "51.5155,-0.0753"
+terrology "Edinburgh Castle" --to "Arthur's Seat, Edinburgh" --buffer 0.08
 ```
 
 **Area (GeoJSON)** — map clipped to a polygon boundary; everything outside is void:
 ```bash
-uv run main.py --area central_park.geojson
-uv run main.py --area manhattan.geojson --dem srtm
+terrology --area central_park.geojson
+terrology --area manhattan.geojson --dem srtm
 ```
 Draw or export a polygon from [geojson.io](https://geojson.io), QGIS, or any GIS tool. The first polygon in the file is used. No location argument is needed — the polygon provides the extent.
 
 **Route (GPX)** — terrain-only map with the GPX track painted as a coloured line:
 ```bash
-uv run main.py --route my_ride.gpx
-uv run main.py --route trail.gpx --route-width 2.0 --terrain-exag 3
+terrology --route my_ride.gpx
+terrology --route trail.gpx --route-width 2.0 --terrain-exag 3
 ```
 
 ---
@@ -203,7 +216,7 @@ export OPENTOPOGRAPHY_API_KEY=your_key
 
 **Area / polygon maps** — draw your boundary at [geojson.io](https://geojson.io) and save as a `.geojson` file. Useful for irregular shapes (a river valley, a city district, a national park) where a rectangular bbox would include unwanted terrain. Everything outside the polygon is removed entirely.
 ```bash
-uv run main.py --area my_area.geojson --smooth-boundary 4
+terrology --area my_area.geojson --smooth-boundary 4
 ```
 
 **Smooth polygon outlines** — if your GeoJSON polygon has few vertices, the map outline will have angular corners. Use `--smooth-boundary 3` to `5` to round them. More iterations pull the outline inward, so don't exceed ~6.
@@ -220,8 +233,8 @@ uv run main.py --area my_area.geojson --smooth-boundary 4
 
 **Contour lines** — `--contour-interval` paints elevation contours using a colour already in your palette — no extra filament required. Choose an interval that matches the relief: 10–25 m for gentle hills, 50–100 m for mountains. Contours are invisible in 1–2 colour mode.
 ```bash
-uv run main.py "Zermatt, Switzerland" --radius 1500 --contour-interval 50
-uv run main.py "Peak District" --radius 3000 --contour-interval 25 --terrain-exag 3
+terrology "Zermatt, Switzerland" --radius 1500 --contour-interval 50
+terrology "Peak District" --radius 3000 --contour-interval 25 --terrain-exag 3
 ```
 
 **Bridges** — road and railway segments tagged `bridge=yes` in OSM sit at the correct elevated position rather than being depressed into the hillside.

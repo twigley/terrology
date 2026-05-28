@@ -11,7 +11,8 @@ uv sync --extra web
 ## Running the tool
 
 ```bash
-uv run main.py "Snowdon" --radius 500
+uv run main.py "Snowdon" --radius 500   # in the repo
+terrology "Snowdon" --radius 500        # when installed
 ```
 
 ## Running the web UI

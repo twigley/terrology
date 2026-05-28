@@ -3,7 +3,8 @@
 ## Running the project
 
 ```bash
-uv run main.py <args>
+uv run main.py <args>   # in the repo
+terrology <args>        # when installed via uv tool install
 ```
 
 Always use `uv`. Never pip-install or suggest requirements.txt.
@@ -71,7 +72,7 @@ AW3D30 and SRTM use the OpenTopography API and require a free key stored in
 OPENTOPOGRAPHY_API_KEY=<your-key>
 ```
 
-Or save it once with: `uv run main.py --save-api-key <key>`
+Or save it once with: `terrology --save-api-key <key>`
 
 **AW3D30 gives better bridge deck elevations** — GLO-30 (radar) sometimes records bridge
 decks at river-surface level; AW3D30 (optical stereo) measures the visible deck surface.

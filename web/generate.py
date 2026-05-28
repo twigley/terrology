@@ -42,7 +42,7 @@ def _make_shape_polygon(lat: float, lon: float, radius: float, shape: str):
 
 def run_job(job_id: str, params: dict) -> None:
     """Called by FastAPI BackgroundTasks; runs run_pipeline and updates the job store."""
-    from main import run_pipeline
+    from terrology.cli import run_pipeline
 
     out_dir = _JOB_DIR / job_id
     store.update(
