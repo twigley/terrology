@@ -1,22 +1,25 @@
 """
-terrology — generate 3D-printable terrain maps from OpenStreetMap + Copernicus GLO-30.
+terrology — generate 3D-printable terrain maps from OpenStreetMap + elevation data.
 
-Elevation data: Copernicus GLO-30 DEM, fetched directly from the public AWS S3 bucket.
-No API key required.
+Elevation sources (--dem):
+  glo30    Copernicus GLO-30 via public S3 — no API key required (default)
+  srtm     SRTM GL1 via OpenTopography — free key required
+  aw3d30   ALOS AW3D30 via OpenTopography — free key required
 
 Output files
   terrain.stl    terrain base (mono-colour printing)
   buildings.stl  building extrusions
   model.obj      combined coloured model for multi-colour slicers
   model.mtl      material colours for model.obj
-                 Import model.obj into Bambu Studio 1.9.1+ — it reads the MTL
-                 colours and lets you remap each material (terrain/water/parks/
-                 buildings) to a filament.
+  model.3mf      Bambu Studio 3MF with per-face colour metadata
 
 Usage examples
   uv run main.py "Snowdon" --radius 500
   uv run main.py 51.5074,-0.1278 --radius 600 --scale 4000 --terrain-exag 3
   uv run main.py "Zurich" --output ./zurich
+  uv run main.py "Edinburgh Castle" --to "Arthur's Seat, Edinburgh"
+  uv run main.py --area my_area.geojson
+  uv run main.py --route my_ride.gpx
 """
 
 import argparse

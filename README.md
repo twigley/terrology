@@ -7,10 +7,16 @@ Generate 3D-printable terrain and building models from OpenStreetMap and OpenTop
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/)
-- A free [OpenTopography API key](https://portal.opentopography.org/requestApiKey)
+
+The default elevation source (`glo30`) requires no API key. The `srtm` and `aw3d30` sources require a free [OpenTopography API key](https://portal.opentopography.org/requestApiKey):
 
 ```bash
-export OPENTOPO_API_KEY=your_key
+export OPENTOPOGRAPHY_API_KEY=your_key
+```
+
+Save it once so you don't have to set it each session:
+```bash
+uv run main.py --save-api-key <your_key>
 ```
 
 ---
@@ -38,7 +44,7 @@ uv run main.py "Edinburgh Castle" --to "Arthur's Seat, Edinburgh" --buffer 0.08
 **Area (GeoJSON)** — map clipped to a polygon boundary; everything outside is void:
 ```bash
 uv run main.py --area central_park.geojson
-uv run main.py --area manhattan.geojson --dem-type SRTMGL1
+uv run main.py --area manhattan.geojson --dem srtm
 ```
 Draw or export a polygon from [geojson.io](https://geojson.io), QGIS, or any GIS tool. The first polygon in the file is used. No location argument is needed — the polygon provides the extent.
 
@@ -47,6 +53,26 @@ Draw or export a polygon from [geojson.io](https://geojson.io), QGIS, or any GIS
 uv run main.py --route my_ride.gpx
 uv run main.py --route trail.gpx --route-width 2.0 --terrain-exag 3
 ```
+
+---
+
+## Web interface
+
+A browser-based UI is included. It provides a map for drawing or searching a location, all the key options, a 3D preview of the result, and a ZIP download.
+
+**Run locally:**
+```bash
+uv run uvicorn web.app:app --host 0.0.0.0 --port 8000
+```
+Then open `http://localhost:8000`.
+
+**Run with Docker:**
+```bash
+docker build -t terrology .
+docker run -p 8000:8000 -e OPENTOPOGRAPHY_API_KEY=your_key terrology
+```
+
+The API has a rate limit of 5 jobs/hour per IP by default. Set `TERROLOGY_NO_RATE_LIMIT=1` to disable it (useful for local use).
 
 ---
 
@@ -60,6 +86,7 @@ uv run main.py --route trail.gpx --route-width 2.0 --terrain-exag 3
 | `parks.stl` | Parks/woodland surface patch |
 | `roads.stl` | Roads/paths surface patch |
 | `model.obj` + `model.mtl` | Combined coloured model for multi-colour slicers |
+| `model.3mf` | Bambu Studio 3MF with per-face colour metadata |
 
 Import `model.obj` into Bambu Studio — it reads the MTL colours and lets you assign each material to a filament in the *Filament* panel.
 
@@ -105,22 +132,20 @@ Use `--colors` to limit the number of materials (e.g. `--colors 2` for a two-col
 | Flag | Default | Description |
 |---|---|---|
 | `--grid-size` | `200` | Terrain base mesh resolution N×N |
-| `--color-grid-size` | `400` | Colour surface mesh resolution N×N — higher gives finer roads/paths |
+| `--color-grid-size` | `800` | Colour surface mesh resolution N×N — higher gives finer roads/paths |
 | `--color-depth` | `1.5` | Depth (mm) colour features project into terrain — limits filament changes to surface layers |
 | `--nozzle` | `0.4` | Nozzle diameter in mm. Both grid sizes are capped at `model_size ÷ (2 × nozzle)` so no cell is finer than the minimum printable feature. |
-| `--dem-type` | `COP30` | Elevation dataset — see table below |
+| `--dem` | `glo30` | Elevation dataset — see table below |
 
-#### DEM types
+#### DEM sources
 
-| Dataset | Type | Resolution | Coverage | Best for |
-|---|---|---|---|---|
-| `COP30` *(default)* | DSM | 30 m | Global | Most areas — good detail, but includes building/tree heights in the surface |
-| `SRTMGL1` | DSM | 30 m | Global (±60°) | Urban areas where building heights in COP30 distort the terrain — slightly smoother |
-| `NASADEM` | DSM | 30 m | Global (±60°) | Similar to SRTMGL1; reprocessed SRTM with fewer voids |
-| `AW3D30` | DSM | 30 m | Global | Often sharper than SRTM in mountainous areas |
-| `EU_DTM` | **DTM** | 30 m | Europe only | Best terrain accuracy in Europe — bare-earth model that excludes buildings and trees |
+| Value | Resolution | Coverage | Notes |
+|---|---|---|---|
+| `glo30` *(default)* | 30 m | Global | Copernicus GLO-30 via public S3 — no API key needed |
+| `srtm` | 30 m | Global (±60°) | SRTM GL1 via OpenTopography — smoother in dense urban areas |
+| `aw3d30` | 30 m | Global | ALOS AW3D30 via OpenTopography — often sharper in mountains; better bridge deck elevation |
 
-**DSM vs DTM:** All datasets except `EU_DTM` are Digital *Surface* Models — they capture the top of whatever is on the ground, including buildings and forests. `EU_DTM` is a Digital *Terrain* Model (bare earth), so urban areas in Europe show flat streets rather than building spikes. For non-European cities, `SRTMGL1` tends to be less spiky than `COP30` in dense urban areas.
+All three are Digital Surface Models (DSM) — they measure the top of the surface including buildings and trees, which adds height to dense urban areas. `srtm` tends to be slightly smoother than `glo30` in cities. Both `srtm` and `aw3d30` require a free OpenTopography API key.
 
 ### Colour
 
@@ -135,7 +160,7 @@ Use `--colors` to limit the number of materials (e.g. `--colors 2` for a two-col
 | Flag | Default | Description |
 |---|---|---|
 | `--output` | `./output` | Output directory |
-| `--api-key` | env | OpenTopography API key (or set `OPENTOPO_API_KEY`) |
+| `--save-api-key` | — | Save an OpenTopography API key to `~/.config/terrology/config` and exit |
 | `--no-terrain` | — | Skip terrain — buildings and features only |
 | `--no-buildings` | — | Skip building extrusion — terrain and features only |
 | `--no-cache` | — | Ignore cached downloads |
@@ -147,7 +172,7 @@ Use `--colors` to limit the number of materials (e.g. `--colors 2` for a two-col
 
 **API key** — set once as an environment variable so you don't have to pass it every run:
 ```bash
-export OPENTOPO_API_KEY=your_key
+export OPENTOPOGRAPHY_API_KEY=your_key
 ```
 
 **Caching** — OSM and elevation data are cached in `~/.cache/3dmap/`. Re-runs with the same area are fast. Use `--no-cache` to force a fresh download. If features look unexpectedly missing, try `--no-cache` — a failed fetch is cached as empty.
@@ -167,7 +192,7 @@ uv run main.py --area my_area.geojson --smooth-boundary 4
 
 **Route maps** — the GPX bounding box is used automatically. Adjust `--buffer` to add more space around the track edges (default 5%). The route line width (`--route-width`) is in printed mm, not real-world metres, so it stays the same visual size regardless of map scale.
 
-**Coastal maps** — coastlines and sea are detected automatically from OSM coastline data. Use `SRTMGL1` rather than `COP30` for dense coastal cities to avoid building spikes in the terrain.
+**Coastal maps** — coastlines and sea are detected automatically from OSM coastline data. Use `--dem srtm` for dense coastal cities to reduce building spikes in the terrain.
 
 **Contour lines** — `--contour-interval` paints elevation contours using a colour already in your palette — no extra filament required. Choose an interval that matches the relief: 10–25 m for gentle hills, 50–100 m for mountains. Contours are invisible in 1–2 colour mode.
 ```bash
@@ -187,7 +212,6 @@ Map data © [OpenStreetMap contributors](https://www.openstreetmap.org/copyright
 
 Elevation data provided by [OpenTopography](https://opentopography.org/). Datasets used:
 
-- **COP30** — © DLR/ESA, distributed under CC BY 4.0
-- **SRTMGL1 / NASADEM** — NASA/USGS, public domain
-- **AW3D30** — © JAXA, distributed under CC BY 4.0
-- **EU_DTM** — © Copernicus Land Monitoring Service / EEA
+- **GLO-30 (glo30)** — © DLR/ESA, distributed under CC BY 4.0
+- **SRTM GL1 (srtm)** — NASA/USGS, public domain
+- **AW3D30 (aw3d30)** — © JAXA, distributed under CC BY 4.0

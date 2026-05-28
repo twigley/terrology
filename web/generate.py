@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import math
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
 from web.jobs import JobStatus, store
+
+_JOB_DIR = Path(os.environ.get("TERROLOGY_JOB_DIR", "/tmp/terrology"))
 
 
 def _make_shape_polygon(lat: float, lon: float, radius: float, shape: str):
@@ -41,7 +44,7 @@ def run_job(job_id: str, params: dict) -> None:
     """Called by FastAPI BackgroundTasks; runs run_pipeline and updates the job store."""
     from main import run_pipeline
 
-    out_dir = Path("/tmp/terrology") / job_id
+    out_dir = _JOB_DIR / job_id
     store.update(
         job_id,
         status=JobStatus.RUNNING,

@@ -24,9 +24,9 @@ Always use `uv`. Never pip-install or suggest requirements.txt.
 
 `model.obj` + `model.mtl` — import into Bambu Studio, assign each material to a filament slot.
 
-3MF export was removed: the `paint_color` per-triangle encoding works correctly but
-`project_settings.config` causes unavoidable "customised presets" dialogs and slot-naming
-issues without knowing the user's installed Bambu preset names. See `docs/bambu_3mf_format.md`.
+`model.3mf` is also exported. The per-face colour encoding works correctly, but Bambu Studio
+may show "customised presets" dialogs if `project_settings.config` references preset names that
+don't match the user's installed Bambu presets. See `docs/bambu_3mf_format.md`.
 
 ## Materials / colours
 
