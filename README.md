@@ -1,8 +1,14 @@
-# Terrology
+<p align="center">
+  <img src="docs/terrology.png" alt="Terrology" width="360"/>
+</p>
 
-Generate 3D-printable terrain and building models from OpenStreetMap and OpenTopography elevation data.
+<p align="center">Generate 3D-printable terrain and building models from OpenStreetMap and elevation data.</p>
 
 ---
+
+<p align="center">
+  <img src="docs/example.jpg" alt="Printed terrain map" width="600"/>
+</p>
 
 ## Requirements
 
