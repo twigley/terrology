@@ -12,3 +12,8 @@ wheels/
 # Downloaded cache and generated output
 cache/
 output/
+
+# Example build artefacts — keep only screenshots and OBJ/MTL
+examples/*/*.stl
+examples/*/*.3mf
+examples/*/build.log
