@@ -13,7 +13,9 @@ wheels/
 cache/
 output/
 
-# Example build artefacts — keep only screenshots and OBJ/MTL
+# Example build artefacts — keep only screenshots
 examples/*/*.stl
 examples/*/*.3mf
+examples/*/*.obj
+examples/*/*.mtl
 examples/*/build.log
