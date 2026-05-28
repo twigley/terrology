@@ -32,6 +32,7 @@ web = [
 
 [project.scripts]
 terrology = "terrology.cli:main"
+terrology-web = "terrology.serve:main"
 
 [build-system]
 requires = ["hatchling"]

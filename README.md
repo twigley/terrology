@@ -97,10 +97,17 @@ terrology --route trail.gpx --route-width 2.0 --terrain-exag 3
 
 A browser-based UI is included. It provides a map for drawing or searching a location, all the key options, a 3D preview of the result, and a ZIP download.
 
-**Run locally:**
+**Run locally (installed):**
+```bash
+uv tool install "git+https://github.com/twigley/terrology[web]"
+terrology-web
+```
+
+**Run locally (cloned repo):**
 ```bash
 uv run uvicorn web.app:app --host 0.0.0.0 --port 8000
 ```
+
 Then open `http://localhost:8000`.
 
 **Run with Docker:**
