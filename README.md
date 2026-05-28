@@ -21,6 +21,9 @@
 <td align="center"><img src="examples/two-point/twopoint.png" width="360"/><br/><sub><b>Two-point</b> — Edinburgh Castle to Arthur's Seat</sub></td>
 <td align="center"><img src="examples/route/route.png" width="360"/><br/><sub><b>Route</b> — Beacon Fell Country Park GPX</sub></td>
 </tr>
+<tr>
+<td align="center" colspan="2"><img src="examples/coastal/coastal.png" width="360"/><br/><sub><b>Coastal</b> — St Ives, Cornwall</sub></td>
+</tr>
 </table>
 
 ---
