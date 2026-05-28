@@ -10,6 +10,21 @@
   <img src="docs/example.jpg" alt="Printed terrain map" width="600"/>
 </p>
 
+## Examples
+
+<table>
+<tr>
+<td align="center"><img src="examples/urban/urban.png" width="360"/><br/><sub><b>Urban</b> — Canary Wharf, London</sub></td>
+<td align="center"><img src="examples/mountain/mountain.png" width="360"/><br/><sub><b>Mountain</b> — Snowdon with 50 m contours</sub></td>
+</tr>
+<tr>
+<td align="center"><img src="examples/two-point/twopoint.png" width="360"/><br/><sub><b>Two-point</b> — Edinburgh Castle to Arthur's Seat</sub></td>
+<td align="center"><img src="examples/route/route.png" width="360"/><br/><sub><b>Route</b> — Beacon Fell Country Park GPX</sub></td>
+</tr>
+</table>
+
+---
+
 ## Requirements
 
 - [uv](https://docs.astral.sh/uv/)
