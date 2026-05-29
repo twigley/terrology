@@ -1,3 +1,13 @@
+---
+title: Terrology
+emoji: 🗺️
+colorFrom: green
+colorTo: blue
+sdk: docker
+app_port: 8000
+pinned: false
+---
+
 <p align="center">
   <img src="docs/terrology.png" alt="Terrology" width="360"/>
 </p>
