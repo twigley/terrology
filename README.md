@@ -107,6 +107,8 @@ terrology --route trail.gpx --route-width 2.0 --terrain-exag 3
 
 A browser-based UI is included. It provides a map for drawing or searching a location, all the key options, a 3D preview of the result, and a ZIP download.
 
+**Try it live:** https://huggingface.co/spaces/twigley/terrology
+
 **Run locally (installed):**
 ```bash
 uv tool install "git+https://github.com/twigley/terrology[web]"
