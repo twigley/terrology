@@ -116,9 +116,33 @@ docker build -t terrology .
 docker run -p 8000:8000 -e OPENTOPOGRAPHY_API_KEY=your_key terrology
 ```
 
-The API has a rate limit of 5 jobs/hour per IP by default. Set `TERROLOGY_NO_RATE_LIMIT=1` to disable it (useful for local use).
+### Hosting
 
-Each job runs in its own process so memory is fully released when it completes — the server returns to its idle footprint (~50 MB) between jobs. By default only one job runs at a time; set `MAX_CONCURRENT_JOBS=2` (or higher) if your instance has enough RAM (allow ~600 MB per concurrent job).
+Each job runs in its own process so memory is fully released when it finishes — the server returns to ~50 MB idle between jobs. The minimum spec for a public instance is **1 GB RAM**.
+
+| Platform | Plan | RAM | Cost | Notes |
+|---|---|---|---|---|
+| [Hetzner Cloud](https://www.hetzner.com/cloud/) | CX22 | 4 GB | ~€4/mo | Best value; dedicated VM |
+| [Fly.io](https://fly.io) | shared-cpu-1x | 1 GB | ~$5/mo | `fly launch` from the repo root |
+| [Render](https://render.com) | Starter | 512 MB | Free / $7/mo | Free tier sleeps after inactivity |
+| [Railway](https://railway.app) | Hobby | 8 GB | ~$5/mo | Easy GitHub deploy |
+| Self-hosted VPS | — | 1 GB+ | varies | Any provider with Docker |
+
+**Fly.io quickstart:**
+```bash
+fly launch          # detects the Dockerfile, creates fly.toml
+fly secrets set OPENTOPOGRAPHY_API_KEY=your_key
+fly deploy
+```
+
+**Environment variables:**
+
+| Variable | Default | Description |
+|---|---|---|
+| `OPENTOPOGRAPHY_API_KEY` | — | Required for `srtm` and `aw3d30` DEM sources |
+| `TERROLOGY_NO_RATE_LIMIT` | unset | Set to `1` to disable the 5 jobs/hour/IP rate limit |
+| `MAX_CONCURRENT_JOBS` | `1` | Max simultaneous jobs — increase on larger instances (allow ~600 MB RAM per job) |
+| `TERROLOGY_JOB_DIR` | `/tmp/terrology` | Directory for job output files |
 
 ---
 
