@@ -71,6 +71,10 @@ class JobStore:
         if job and job.output_dir and job.output_dir.exists():
             shutil.rmtree(job.output_dir, ignore_errors=True)
 
+    def running_count(self) -> int:
+        with self._lock:
+            return sum(1 for j in self._jobs.values() if j.status == JobStatus.RUNNING)
+
     def cleanup_expired(self) -> None:
         now = _now()
         with self._lock:

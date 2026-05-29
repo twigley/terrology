@@ -392,6 +392,12 @@ generateBtn.addEventListener("click", async () => {
             showStatus("⚠️", "Rate limit reached", "Try again in an hour.");
             return;
         }
+        if (res.status === 503) {
+            generateBtn.disabled = false;
+            generateBtn.textContent = "Generate terrain map";
+            showStatus("⏳", "Server busy", "Try again shortly.");
+            return;
+        }
         if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             throw new Error(err.detail || `HTTP ${res.status}`);

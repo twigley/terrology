@@ -36,6 +36,7 @@ async def lifespan(app: FastAPI):
 
 
 _RATE_LIMIT = "5/hour" if not os.getenv("TERROLOGY_NO_RATE_LIMIT") else "10000/hour"
+_MAX_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "1"))
 
 limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(title="Terrology", lifespan=lifespan)
@@ -98,6 +99,8 @@ async def create_job(
     params: JobParams,
     background_tasks: BackgroundTasks,
 ):
+    if store.running_count() >= _MAX_JOBS:
+        raise HTTPException(status_code=503, detail="Server busy – try again shortly")
     job_id = str(uuid.uuid4())
     store.create(job_id)
     background_tasks.add_task(run_job, job_id, params.model_dump())

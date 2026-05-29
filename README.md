@@ -118,6 +118,8 @@ docker run -p 8000:8000 -e OPENTOPOGRAPHY_API_KEY=your_key terrology
 
 The API has a rate limit of 5 jobs/hour per IP by default. Set `TERROLOGY_NO_RATE_LIMIT=1` to disable it (useful for local use).
 
+Each job runs in its own process so memory is fully released when it completes — the server returns to its idle footprint (~50 MB) between jobs. By default only one job runs at a time; set `MAX_CONCURRENT_JOBS=2` (or higher) if your instance has enough RAM (allow ~600 MB per concurrent job).
+
 ---
 
 ## Output files
