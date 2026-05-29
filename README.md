@@ -120,13 +120,23 @@ docker run -p 8000:8000 -e OPENTOPOGRAPHY_API_KEY=your_key terrology
 
 Each job runs in its own process so memory is fully released when it finishes — the server returns to ~50 MB idle between jobs. The minimum spec for a public instance is **1 GB RAM**.
 
-| Platform | Plan | RAM | Cost | Notes |
+#### Free options
+
+| Platform | RAM | Sleep policy | Credit card | Notes |
 |---|---|---|---|---|
-| [Hetzner Cloud](https://www.hetzner.com/cloud/) | CX22 | 4 GB | ~€4/mo | Best value; dedicated VM |
-| [Fly.io](https://fly.io) | shared-cpu-1x | 1 GB | ~$5/mo | `fly launch` from the repo root |
-| [Render](https://render.com) | Starter | 512 MB | Free / $7/mo | Free tier sleeps after inactivity |
-| [Railway](https://railway.app) | Hobby | 8 GB | ~$5/mo | Easy GitHub deploy |
-| Self-hosted VPS | — | 1 GB+ | varies | Any provider with Docker |
+| [Oracle Cloud Always Free](https://www.oracle.com/cloud/free/) | 24 GB (ARM VM) | Never | Required (verification only, never charged) | Best free option; full VM with Docker. ARM instances are often at capacity in popular regions — may take retries to provision |
+| [Hugging Face Spaces](https://huggingface.co/spaces) | 16 GB | After 48 h inactivity | Not required | Run as a Docker Space. Terrology's poll-based job API avoids the platform's HTTP timeout limits |
+
+Render, Koyeb, and Northflank free tiers top out at 256–512 MB RAM — not enough for a map generation job. Fly.io removed its free tier for new users in late 2024.
+
+#### Paid options
+
+| Platform | Plan | RAM | Cost |
+|---|---|---|---|
+| [Hetzner Cloud](https://www.hetzner.com/cloud/) | CX22 | 4 GB | ~€4/mo |
+| [Railway](https://railway.app) | Hobby | up to 8 GB | ~$5/mo |
+| [Fly.io](https://fly.io) | shared-cpu-1x | 1 GB | ~$5/mo |
+| Self-hosted VPS | — | 1 GB+ | varies |
 
 **Fly.io quickstart:**
 ```bash
