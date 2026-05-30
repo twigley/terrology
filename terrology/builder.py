@@ -1028,15 +1028,19 @@ class MapBuilder:
         osm_data: dict,
         base_colors: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Overlay OSM highway=raceway features as slot 5 (route/red).
+        """Overlay race circuit features as slot 5 (route/red).
 
-        If base_colors is provided, raceway faces are painted over the existing
-        color array; otherwise non-raceway faces default to terrain (0).
+        Sources geometry from two OSM layers:
+        - roads layer filtered to highway=raceway (permanent circuits)
+        - circuits layer with sport=motor (street/temporary circuits, e.g. Monaco)
+
+        If base_colors is provided, raceway faces overwrite it; otherwise
+        non-raceway faces default to terrain (0).
         """
         from shapely import STRtree
-        from shapely.geometry import Polygon
+        from shapely.affinity import scale as _affine_scale
+        from shapely.affinity import translate as _affine_translate
 
-        roads_utm = self._gdf_to_utm(osm_data, "roads")
         n_faces = len(terrain_mesh.faces)
         color_idx = (
             base_colors.copy()
@@ -1044,56 +1048,45 @@ class MapBuilder:
             else np.zeros(n_faces, dtype=np.int32)
         )
 
-        if roads_utm is None or len(roads_utm) == 0:
-            print("  no raceway features found in this area")
+        # Collect geometry from both sources
+        geoms = []
+        roads_utm = self._gdf_to_utm(osm_data, "roads")
+        if roads_utm is not None and len(roads_utm) > 0:
+            hw_col = roads_utm.get("highway")
+            if hw_col is not None:
+                geoms.extend(roads_utm[hw_col == "raceway"].geometry.tolist())
+
+        circuits_utm = self._gdf_to_utm(osm_data, "circuits")
+        if circuits_utm is not None and len(circuits_utm) > 0:
+            geoms.extend(circuits_utm.geometry.tolist())
+
+        if not geoms:
+            print("  no raceway or circuit features found in this area")
             return color_idx
 
-        raceways = roads_utm[roads_utm.get("highway") == "raceway"]
-        if len(raceways) == 0:
-            print("  no raceway features found in this area")
-            return color_idx
+        print(f"  {len(geoms)} raceway/circuit geometry feature(s) found")
 
-        print(f"  {len(raceways)} raceway feature(s) found")
-
+        buf_mm = _road_buffer_m("raceway") * self.mm_per_m
         centroids_mm = terrain_mesh.triangles_center[:, :2]
         pts = shapely.points(centroids_mm[:, 0], centroids_mm[:, 1])
 
         polys = []
-        for geom in raceways.geometry:
+        for geom in geoms:
             if geom is None or geom.is_empty:
                 continue
-
-            # Convert UTM metres → model mm
-            def _to_mm(coords):
-                return [
-                    ((x - self.x_min) * self.mm_per_m, (y - self.y_min) * self.mm_per_m)
-                    for x, y in coords
-                ]
-
-            if geom.geom_type == "LineString":
-                coords_mm = _to_mm(geom.coords)
-                from shapely.geometry import LineString as _LS
-
-                buf_m = _road_buffer_m("raceway")
-                buf_mm = buf_m * self.mm_per_m
-                polys.append(_LS(coords_mm).buffer(buf_mm))
-            elif geom.geom_type == "MultiLineString":
-                from shapely.geometry import LineString as _LS
-
-                buf_m = _road_buffer_m("raceway")
-                buf_mm = buf_m * self.mm_per_m
-                for part in geom.geoms:
-                    polys.append(_LS(_to_mm(part.coords)).buffer(buf_mm))
-            elif geom.geom_type in ("Polygon", "MultiPolygon"):
-                if isinstance(geom, Polygon):
-                    from shapely.geometry import Polygon as _Poly
-
-                    polys.append(_Poly(_to_mm(geom.exterior.coords)))
-                else:
-                    for part in geom.geoms:
-                        from shapely.geometry import Polygon as _Poly
-
-                        polys.append(_Poly(_to_mm(part.exterior.coords)))
+            # Shift from UTM metres to model-mm coordinates
+            geom_mm = _affine_scale(
+                _affine_translate(geom, -self.x_min, -self.y_min),
+                xfact=self.mm_per_m,
+                yfact=self.mm_per_m,
+                origin=(0, 0),
+            )
+            if geom_mm.geom_type in ("LineString", "MultiLineString"):
+                polys.append(geom_mm.buffer(buf_mm))
+            elif geom_mm.geom_type == "Polygon":
+                polys.append(geom_mm)
+            elif geom_mm.geom_type == "MultiPolygon":
+                polys.extend(geom_mm.geoms)
 
         if not polys:
             print("  no valid raceway geometries to paint")

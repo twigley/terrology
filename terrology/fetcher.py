@@ -85,6 +85,7 @@ OSM_TAGS = {
     "pedestrian_areas": {"place": "square"},
     "sand": {"natural": ["beach", "sand"], "landuse": "beach"},
     "piers": {"man_made": "pier"},
+    "circuits": {"sport": "motor"},
 }
 
 # Copernicus GLO-30: same data as OpenTopography COP30, no key needed, free commercial use.

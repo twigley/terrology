@@ -346,3 +346,37 @@ def test_colorize_raceway_no_raceway_returns_base():
     assert (colors == 3).all(), (
         "with no OSM data base_colors must be returned unchanged"
     )
+
+
+def test_colorize_raceway_circuit_relation():
+    """sport=motor circuit relation (e.g. Monaco) is painted slot 5."""
+    import geopandas as gpd
+    from shapely.geometry import LinearRing, Polygon
+
+    n, extent_m = 20, 1000.0
+    extent_mm = extent_m / 5000 * 1000
+
+    x_mm = np.linspace(0, extent_mm, n)
+    y_mm = np.linspace(0, extent_mm, n)
+    xg, yg = np.meshgrid(x_mm, y_mm)
+    mesh = _heightfield_layer(xg, yg, np.zeros_like(xg), np.full_like(xg, -3.0))
+    b = _builder(n=n, extent=extent_m)
+
+    # A circuit polygon in the centre of the model
+    cx, cy, r = extent_m / 2, extent_m / 2, extent_m / 4
+    circuit_poly = Polygon(
+        LinearRing(
+            [
+                (cx + r * np.cos(a), cy + r * np.sin(a))
+                for a in np.linspace(0, 2 * np.pi, 32)
+            ]
+        )
+    )
+    circuits_gdf = gpd.GeoDataFrame(
+        {"sport": ["motor"]}, geometry=[circuit_poly], crs=UTM_EPSG
+    )
+    osm_data = {"circuits": circuits_gdf}
+
+    colors = b.colorize_raceway(mesh, osm_data)
+    assert (colors == 5).any(), "circuit relation faces must be painted slot 5"
+    assert (colors == 0).any(), "faces outside circuit must remain terrain (0)"
