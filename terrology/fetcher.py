@@ -163,13 +163,15 @@ def fetch_osm_data(
     def _fetch_combined():
         try:
             return ox.features_from_bbox(bbox, tags=combined_tags)
-        except Exception:
+        except Exception as exc:
+            print(f"  WARNING: OSM combined fetch failed: {exc}")
             return gpd.GeoDataFrame()
 
     def _fetch_coastlines():
         try:
             return ox.features_from_bbox(coast_bbox, tags=OSM_TAGS["coastlines"])
-        except Exception:
+        except Exception as exc:
+            print(f"  WARNING: OSM coastline fetch failed: {exc}")
             return gpd.GeoDataFrame()
 
     print("  Fetching OSM features (2 requests)...")
@@ -193,8 +195,10 @@ def fetch_osm_data(
     total_features = sum(len(v) for v in result.values() if v is not None)
     print(f"  {total_features:,} features across {len(result)} layers")
 
-    if use_cache:
+    if use_cache and total_features > 0:
         _cache.save_osm(south, north, west, east, result)
+    elif use_cache and total_features == 0:
+        print("  (skipping cache — 0 features, likely a fetch error)")
 
     return result
 
