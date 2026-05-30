@@ -209,3 +209,140 @@ def test_sea_faces_have_lower_z_than_land_faces():
     assert sea_z < land_z, (
         f"sea faces (mean z={sea_z:.3f}) must be below land faces (mean z={land_z:.3f})"
     )
+
+
+# ------------------------------------------------------------------ #
+# Route overlay
+# ------------------------------------------------------------------ #
+
+
+def test_colorize_route_overlays_on_base_colors():
+    """Route (slot 5) overwrites base colors; non-route faces keep their base color."""
+    from terrology.builder import _heightfield_layer
+
+    n = 20
+    extent_m = 1000.0
+    extent_mm = extent_m / 5000 * 1000  # scale=5000
+
+    x_mm = np.linspace(0, extent_mm, n)
+    y_mm = np.linspace(0, extent_mm, n)
+    xg, yg = np.meshgrid(x_mm, y_mm)
+    z = np.zeros_like(xg)
+    mesh = _heightfield_layer(xg, yg, z, np.full_like(xg, -3.0))
+
+    b = _builder(n=n, extent=extent_m)
+
+    # Base: mark all faces as water (1)
+    base = np.ones(len(mesh.faces), dtype=np.int32)
+
+    # Route runs diagonally through the model in UTM coords
+    route_utm = [(0.0, 0.0), (extent_m, extent_m)]
+    colors = b.colorize_route(mesh, route_utm, width_mm=2.0, base_colors=base)
+
+    route_faces = colors == 5
+    non_route_faces = colors != 5
+
+    assert route_faces.any(), "some faces must be painted route (5)"
+    assert non_route_faces.any(), "some faces must be outside the route"
+    # Non-route faces must keep their base color (water=1), not revert to terrain (0)
+    assert (colors[non_route_faces] == 1).all(), (
+        "non-route faces must retain base_colors value"
+    )
+
+
+def test_colorize_route_without_base_defaults_to_terrain():
+    """Without base_colors, non-route faces default to terrain (0)."""
+    from terrology.builder import _heightfield_layer
+
+    n = 10
+    extent_m = 1000.0
+    extent_mm = extent_m / 5000 * 1000
+
+    x_mm = np.linspace(0, extent_mm, n)
+    y_mm = np.linspace(0, extent_mm, n)
+    xg, yg = np.meshgrid(x_mm, y_mm)
+    z = np.zeros_like(xg)
+    mesh = _heightfield_layer(xg, yg, z, np.full_like(xg, -3.0))
+
+    b = _builder(n=n, extent=extent_m)
+    route_utm = [(0.0, 0.0), (extent_m, extent_m)]
+    colors = b.colorize_route(mesh, route_utm, width_mm=2.0)
+
+    assert set(np.unique(colors)).issubset({0, 5}), (
+        "without base_colors only terrain (0) and route (5) should appear"
+    )
+
+
+# ------------------------------------------------------------------ #
+# Raceway overlay
+# ------------------------------------------------------------------ #
+
+
+def _raceway_osm_data(geom):
+    """Build a minimal osm_data dict with a single highway=raceway feature."""
+    import geopandas as gpd
+
+    gdf = gpd.GeoDataFrame({"highway": ["raceway"]}, geometry=[geom], crs=UTM_EPSG)
+    return {"roads": gdf}
+
+
+def test_colorize_raceway_paints_slot_5():
+    """Faces within a raceway LineString buffer become slot 5."""
+    from shapely.geometry import LineString
+
+    n, extent_m = 20, 1000.0
+    extent_mm = extent_m / 5000 * 1000
+
+    x_mm = np.linspace(0, extent_mm, n)
+    y_mm = np.linspace(0, extent_mm, n)
+    xg, yg = np.meshgrid(x_mm, y_mm)
+    mesh = _heightfield_layer(xg, yg, np.zeros_like(xg), np.full_like(xg, -3.0))
+    b = _builder(n=n, extent=extent_m)
+
+    raceway_geom = LineString([(0.0, 0.0), (extent_m, extent_m)])
+    osm_data = _raceway_osm_data(raceway_geom)
+
+    colors = b.colorize_raceway(mesh, osm_data)
+    assert (colors == 5).any(), "raceway faces must be painted slot 5"
+    assert set(np.unique(colors)).issubset({0, 5})
+
+
+def test_colorize_raceway_overlays_on_base_colors():
+    """Raceway overwrites base colors; non-raceway faces keep their base color."""
+    from shapely.geometry import LineString
+
+    n, extent_m = 20, 1000.0
+    extent_mm = extent_m / 5000 * 1000
+
+    x_mm = np.linspace(0, extent_mm, n)
+    y_mm = np.linspace(0, extent_mm, n)
+    xg, yg = np.meshgrid(x_mm, y_mm)
+    mesh = _heightfield_layer(xg, yg, np.zeros_like(xg), np.full_like(xg, -3.0))
+    b = _builder(n=n, extent=extent_m)
+
+    base = np.ones(len(mesh.faces), dtype=np.int32)  # all water (1)
+    raceway_geom = LineString([(0.0, 0.0), (extent_m, extent_m)])
+    osm_data = _raceway_osm_data(raceway_geom)
+
+    colors = b.colorize_raceway(mesh, osm_data, base_colors=base)
+    non_raceway = colors != 5
+    assert non_raceway.any(), "some faces must be outside the raceway"
+    assert (colors[non_raceway] == 1).all(), "non-raceway faces must keep base color"
+
+
+def test_colorize_raceway_no_raceway_returns_base():
+    """When no raceway features exist, base_colors is returned unchanged."""
+    n, extent_m = 10, 1000.0
+    extent_mm = extent_m / 5000 * 1000
+
+    x_mm = np.linspace(0, extent_mm, n)
+    y_mm = np.linspace(0, extent_mm, n)
+    xg, yg = np.meshgrid(x_mm, y_mm)
+    mesh = _heightfield_layer(xg, yg, np.zeros_like(xg), np.full_like(xg, -3.0))
+    b = _builder(n=n, extent=extent_m)
+
+    base = np.full(len(mesh.faces), 3, dtype=np.int32)  # all roads (3)
+    colors = b.colorize_raceway(mesh, {}, base_colors=base)
+    assert (colors == 3).all(), (
+        "with no OSM data base_colors must be returned unchanged"
+    )

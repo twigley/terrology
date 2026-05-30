@@ -83,6 +83,7 @@ def _worker(params_json: str, out_dir_str: str) -> None:
             water_depth_mm=params.get("water_depth_mm", 0.8),
             building_exag=params.get("building_exag"),
             dem_source=params.get("dem_source", "glo30"),
+            raceway=params.get("raceway", False),
             output_dir=out_dir,
             color_grid_size=800,
             skip_stls=True,

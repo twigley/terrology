@@ -54,6 +54,7 @@ class JobParams(BaseModel):
     colors: int = Field(4, ge=1, le=7)
     no_buildings: bool = False
     roof_shapes: bool = False
+    raceway: bool = False
     contour_interval: float | None = Field(None, ge=1)
     border_width_mm: float = Field(0.0, ge=0.0, le=20.0)
     water_depth_mm: float = Field(0.8, ge=0.0, le=5.0)

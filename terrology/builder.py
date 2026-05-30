@@ -979,11 +979,13 @@ class MapBuilder:
         terrain_mesh: trimesh.Trimesh,
         route_utm: list[tuple[float, float]],
         width_mm: float = 1.5,
+        base_colors: np.ndarray | None = None,
     ) -> np.ndarray:
-        """Return per-face colour index: 0=terrain, 5=route.
+        """Return per-face colour index with route painted as slot 5.
 
+        If base_colors is provided (e.g. from colorize_terrain), route is
+        overlaid on top; otherwise all non-route faces default to terrain (0).
         width_mm is the total strip width in model space (mm), scale-independent.
-        The buffer radius is width_mm / 2.
         """
         from shapely import STRtree
         from shapely.geometry import LineString
@@ -1009,11 +1011,98 @@ class MapBuilder:
         pt_idx, _ = STRtree([route_poly]).query(pts, predicate="within")
 
         n_faces = len(terrain_mesh.faces)
-        color_idx = np.zeros(n_faces, dtype=np.int32)
+        color_idx = (
+            base_colors.copy()
+            if base_colors is not None
+            else np.zeros(n_faces, dtype=np.int32)
+        )
         color_idx[pt_idx] = 5
 
         pct = len(pt_idx) / n_faces * 100
         print(f"  route: {len(pt_idx):,} faces  ({pct:.1f}%)")
+        return color_idx
+
+    def colorize_raceway(
+        self,
+        terrain_mesh: trimesh.Trimesh,
+        osm_data: dict,
+        base_colors: np.ndarray | None = None,
+    ) -> np.ndarray:
+        """Overlay OSM highway=raceway features as slot 5 (route/red).
+
+        If base_colors is provided, raceway faces are painted over the existing
+        color array; otherwise non-raceway faces default to terrain (0).
+        """
+        from shapely import STRtree
+        from shapely.geometry import Polygon
+
+        roads_utm = self._gdf_to_utm(osm_data, "roads")
+        n_faces = len(terrain_mesh.faces)
+        color_idx = (
+            base_colors.copy()
+            if base_colors is not None
+            else np.zeros(n_faces, dtype=np.int32)
+        )
+
+        if roads_utm is None or len(roads_utm) == 0:
+            print("  no raceway features found in this area")
+            return color_idx
+
+        raceways = roads_utm[roads_utm.get("highway") == "raceway"]
+        if len(raceways) == 0:
+            print("  no raceway features found in this area")
+            return color_idx
+
+        print(f"  {len(raceways)} raceway feature(s) found")
+
+        centroids_mm = terrain_mesh.triangles_center[:, :2]
+        pts = shapely.points(centroids_mm[:, 0], centroids_mm[:, 1])
+
+        polys = []
+        for geom in raceways.geometry:
+            if geom is None or geom.is_empty:
+                continue
+
+            # Convert UTM metres → model mm
+            def _to_mm(coords):
+                return [
+                    ((x - self.x_min) * self.mm_per_m, (y - self.y_min) * self.mm_per_m)
+                    for x, y in coords
+                ]
+
+            if geom.geom_type == "LineString":
+                coords_mm = _to_mm(geom.coords)
+                from shapely.geometry import LineString as _LS
+
+                buf_m = _road_buffer_m("raceway")
+                buf_mm = buf_m * self.mm_per_m
+                polys.append(_LS(coords_mm).buffer(buf_mm))
+            elif geom.geom_type == "MultiLineString":
+                from shapely.geometry import LineString as _LS
+
+                buf_m = _road_buffer_m("raceway")
+                buf_mm = buf_m * self.mm_per_m
+                for part in geom.geoms:
+                    polys.append(_LS(_to_mm(part.coords)).buffer(buf_mm))
+            elif geom.geom_type in ("Polygon", "MultiPolygon"):
+                if isinstance(geom, Polygon):
+                    from shapely.geometry import Polygon as _Poly
+
+                    polys.append(_Poly(_to_mm(geom.exterior.coords)))
+                else:
+                    for part in geom.geoms:
+                        from shapely.geometry import Polygon as _Poly
+
+                        polys.append(_Poly(_to_mm(part.exterior.coords)))
+
+        if not polys:
+            print("  no valid raceway geometries to paint")
+            return color_idx
+
+        pt_idx, _ = STRtree(polys).query(pts, predicate="within")
+        color_idx[pt_idx] = 5
+        pct = len(pt_idx) / n_faces * 100
+        print(f"  raceway: {len(pt_idx):,} faces  ({pct:.1f}%)")
         return color_idx
 
 

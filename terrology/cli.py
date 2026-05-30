@@ -53,6 +53,7 @@ def run_pipeline(
     water_depth_mm: float = 0.8,
     border_width_mm: float = 0.0,
     dem_source: str = "glo30",
+    raceway: bool = False,
 ) -> Path:
     """Run the terrology pipeline for a single lat/lon point with a radius.
 
@@ -216,6 +217,14 @@ def run_pipeline(
     )
     terrain_face_colors = _limit_colors(terrain_face_colors, colors)
 
+    if raceway:
+        print("\nHighlighting raceway...")
+        terrain_face_colors = builder.colorize_raceway(
+            builder.terrain_surface_mesh,
+            osm_data,
+            base_colors=terrain_face_colors,
+        )
+
     if not skip_stls:
         print("\nExporting per-colour STLs...")
         export_color_stls(
@@ -299,6 +308,11 @@ def main() -> None:
         default=1.5,
         help="Route line width on the printed model in mm (default: 1.5). "
         "Scale-independent — always this wide regardless of map area.",
+    )
+    parser.add_argument(
+        "--raceway",
+        action="store_true",
+        help="Highlight any race circuit (OSM highway=raceway) in the mapped area as a red overlay.",
     )
     parser.add_argument(
         "--buffer",
@@ -549,6 +563,7 @@ def main() -> None:
                 water_depth_mm=args.water_depth,
                 border_width_mm=args.border_width,
                 dem_source=args.dem,
+                raceway=args.raceway,
             )
             return
         lat2, lon2 = _resolve_location(args.to)
@@ -640,28 +655,12 @@ def main() -> None:
         water_depth_mm=args.water_depth,
     )
 
-    # Fetch data — route mode only needs elevation; normal mode fetches both in parallel
+    # Fetch elevation, OSM features, and Overture buildings in parallel
     elevation = header = None
-    if args.route:
-        osm_data = {}
-        if not args.no_terrain:
-            print("\nFetching elevation data...")
-            elevation, header = fetch_elevation(
-                south=osm_south - elev_pad,
-                north=osm_north + elev_pad,
-                west=osm_west - elev_pad,
-                east=osm_east + elev_pad,
-                use_cache=use_cache,
-                dem_source=args.dem,
-            )
-            print(
-                f"  Elevation: {elevation.shape[1]} x {elevation.shape[0]} cells  "
-                f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
-            )
-    elif not args.no_terrain:
+    if not args.no_terrain:
         from concurrent.futures import ThreadPoolExecutor
 
-        _need_ov = not args.route and not args.no_buildings
+        _need_ov = not args.no_buildings
         print("Fetching OSM, elevation and Overture data in parallel...")
         with ThreadPoolExecutor(max_workers=3) as executor:
             osm_f = executor.submit(
@@ -700,7 +699,7 @@ def main() -> None:
             f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
         )
     else:
-        _need_ov = not args.route and not args.no_buildings
+        _need_ov = not args.no_buildings
         if _need_ov:
             print("Fetching OSM and Overture data in parallel...")
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -740,14 +739,14 @@ def main() -> None:
         terrain_mesh = builder.build_terrain(elevation, header, osm_data)
         export_stl(terrain_mesh, out_dir / "terrain.stl")
 
-    # --- Buildings (skipped in route mode or when --no-buildings) ---
-    if not args.route and not args.no_buildings:
+    # --- Buildings ---
+    if not args.no_buildings:
         osm_data["buildings"] = supplement_buildings(
             osm_data.get("buildings"), ov_f.result()
         )
 
     buildings_mesh = None
-    if not args.route and not args.no_buildings:
+    if not args.no_buildings:
         print("\nExtruding buildings...")
         buildings_mesh = builder.build_buildings(
             osm_data, with_roof_shapes=args.roof_shapes
@@ -759,6 +758,20 @@ def main() -> None:
     terrain_face_colors = None
     if terrain_mesh is not None:
         assert builder.terrain_surface_mesh is not None
+        print("\nColouring terrain faces...")
+        terrain_face_colors = builder.colorize_terrain(
+            builder.terrain_surface_mesh,
+            osm_data,
+            contour_interval_m=args.contour_interval,
+        )
+        terrain_face_colors = _limit_colors(terrain_face_colors, args.colors)
+        if args.raceway:
+            print("\nHighlighting raceway...")
+            terrain_face_colors = builder.colorize_raceway(
+                builder.terrain_surface_mesh,
+                osm_data,
+                base_colors=terrain_face_colors,
+            )
         if args.route:
             assert route_utm is not None
             print("\nPainting route on terrain faces...")
@@ -766,18 +779,11 @@ def main() -> None:
                 builder.terrain_surface_mesh,
                 route_utm,
                 width_mm=args.route_width,
+                base_colors=terrain_face_colors,
             )
-        else:
-            print("\nColouring terrain faces...")
-            terrain_face_colors = builder.colorize_terrain(
-                builder.terrain_surface_mesh,
-                osm_data,
-                contour_interval_m=args.contour_interval,
-            )
-            terrain_face_colors = _limit_colors(terrain_face_colors, args.colors)
 
     # --- Per-colour STLs (for slicers that can't use MTL) ---
-    if terrain_face_colors is not None and not args.route:
+    if terrain_face_colors is not None:
         print("\nExporting per-colour STLs...")
         export_color_stls(
             builder.terrain_surface_mesh,
