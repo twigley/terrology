@@ -171,7 +171,21 @@ class MapBuilder:
         # coastline GDF, not the terrain interpolator.  We then zero out sea DEM cells
         # so the interpolated terrain is flat at 0 m instead of NaN-filled with
         # adjacent cliff heights (GLO-30 has no data for the open sea).
-        self._sea_poly = self._build_sea_polygon(osm_data)
+        #
+        # Pass a raw-DEM elevation lookup so _build_sea_polygon can pre-filter
+        # candidates by centroid elevation.  This handles the case where the map
+        # centre is in the harbour/sea — the land polygon then passes the
+        # centre-containment filter and can be mis-selected by direction voting.
+        wgs84_crs = CRS.from_epsg(4326)
+        _to_wgs84 = Transformer.from_crs(self.utm_crs, wgs84_crs, always_xy=True)
+
+        def _dem_elev(utm_x: float, utm_y: float) -> float:
+            lon_c, lat_c = _to_wgs84.transform(utm_x, utm_y)
+            lat_i = int(np.clip(np.argmin(np.abs(lats - lat_c)), 0, nrows - 1))
+            lon_i = int(np.clip(np.argmin(np.abs(lons - lon_c)), 0, ncols - 1))
+            return float(elevation_arr[lat_i, lon_i])
+
+        self._sea_poly = self._build_sea_polygon(osm_data, elev_fn=_dem_elev)
         if self._sea_poly is not None:
             elevation_arr = _apply_sea_mask(
                 elevation_arr, header, self._sea_poly, self.utm_crs
@@ -322,7 +336,7 @@ class MapBuilder:
 
         return self.terrain_mesh
 
-    def _build_sea_polygon(self, osm_data: dict):
+    def _build_sea_polygon(self, osm_data: dict, elev_fn=None):
         """
         Construct a sea polygon from OSM coastline linestrings clipped to the bbox.
 
@@ -330,6 +344,9 @@ class MapBuilder:
         to identify the sea polygon.  This avoids relying on DEM elevation values in
         sea areas, which are filled from nearest land (often > 10 m) in GLO-30.
         Falls back to centroid elevation if the direction heuristic yields no match.
+
+        elev_fn(utm_x, utm_y) → float: optional raw-DEM elevation lookup used to
+        pre-filter and validate polygon candidates.  NaN / non-finite means open sea.
         """
         from shapely.ops import polygonize_full, unary_union
 
@@ -367,6 +384,20 @@ class MapBuilder:
         if not sea_candidates:
             sea_candidates = polys  # edge case: user location is at sea
 
+        # Pre-filter by centroid elevation when a DEM lookup is available.
+        # Keeps only polygons whose centroid is at ≤ 10 m or over open sea
+        # (NaN in the DEM).  This rejects land polygons that pass the centre
+        # filter when the map centre is in the harbour/sea.
+        if elev_fn is not None and len(sea_candidates) > 1:
+            low_elev = [
+                p
+                for p in sea_candidates
+                if not np.isfinite(elev_fn(p.centroid.x, p.centroid.y))
+                or elev_fn(p.centroid.x, p.centroid.y) <= 10.0
+            ]
+            if low_elev:
+                sea_candidates = low_elev
+
         # Direction voting: use original line direction (pre-clip) so shapely's
         # intersection cannot reverse winding; clipped midpoints keep candidates
         # inside the bbox.
@@ -388,18 +419,41 @@ class MapBuilder:
                 if poly_votes[i] > 0
             ]
             sea_poly = unary_union(voted) if len(voted) > 1 else voted[0]
-            print(
-                f"  sea polygon: identified by coastline direction ({len(voted)} segment(s))"
+            elev_c = (
+                elev_fn(sea_poly.centroid.x, sea_poly.centroid.y)
+                if elev_fn
+                else float("nan")
             )
-            return sea_poly
+            # Final check: reject if the result's centroid is clearly inland.
+            if elev_fn is not None:
+                if np.isfinite(elev_c) and elev_c > 10.0:
+                    print(
+                        f"  sea polygon: direction vote centroid at {elev_c:.0f} m "
+                        f"— discarding, falling back to elevation"
+                    )
+                    poly_votes.clear()  # fall through to elevation fallback
+                else:
+                    print(
+                        f"  sea polygon: identified by coastline direction ({len(voted)} segment(s))"
+                    )
+                    return sea_poly
+            else:
+                print(
+                    f"  sea polygon: identified by coastline direction ({len(voted)} segment(s))"
+                )
+                return sea_poly
 
-        # No directional votes — fall back to lowest centroid elevation.
-        if self._terrain_interp is None:
-            return sea_candidates[0] if len(sea_candidates) == 1 else None
-
+        # No valid directional votes — fall back to lowest centroid elevation.
         def _centroid_elev(p) -> float:
             c = p.centroid
-            return float(self._terrain_interp([[c.y, c.x]])[0])
+            if elev_fn is not None:
+                return elev_fn(c.x, c.y)
+            if self._terrain_interp is not None:
+                return float(self._terrain_interp([[c.y, c.x]])[0])
+            return float("inf")
+
+        if all(_centroid_elev(p) == float("inf") for p in sea_candidates):
+            return sea_candidates[0] if len(sea_candidates) == 1 else None
 
         sea_poly = min(sea_candidates, key=_centroid_elev)
         elev = _centroid_elev(sea_poly)
@@ -549,10 +603,22 @@ class MapBuilder:
             pt_idx, _ = STRtree([self._sea_poly]).query(pts, predicate="covered_by")
             if len(pt_idx):
                 water_mask[pt_idx] = True
-        else:
-            # Fallback when no OSM coastline polygon was found: depress by elevation threshold.
-            if self._min_elev <= 1.5:
-                water_mask[elev.ravel() <= 1.5] = True
+
+        # Elevation-based supplement — catches harbour/sea cells at sea level that
+        # fall just outside the polygon boundary (e.g. enclosed harbours whose OSM
+        # coastline doesn't fully trace the basin).  Scoped to a 20 model-mm buffer
+        # so it doesn't sweep up flat inland areas.
+        if self._sea_poly is not None and self._min_elev <= 1.5:
+            near_idx, _ = STRtree([self._sea_poly.buffer(20.0)]).query(
+                pts, predicate="covered_by"
+            )
+            if len(near_idx):
+                near_mask = np.zeros(len(pts), dtype=bool)
+                near_mask[near_idx] = True
+                water_mask |= near_mask & (elev.ravel() <= 1.5)
+        elif self._sea_poly is None and self._min_elev <= 1.5:
+            # No polygon at all — use elevation alone as the only guide.
+            water_mask[elev.ravel() <= 1.5] = True
 
         water_mask &= ~elevated_mask
         elev.ravel()[water_mask] -= water_depress_m
@@ -816,18 +882,29 @@ class MapBuilder:
         if g is not None:
             _paint_tree(list(g.geometry), 7)
 
-        # 1. Sea — vector polygon for smooth coastline; elevation-based fallback.
+        # 1. Sea — vector polygon for smooth coastline; elevation-based supplement.
         if self._sea_poly is not None:
             pt_idx, _ = STRtree([self._sea_poly]).query(pts, predicate="covered_by")
             if len(pt_idx):
-                color_idx[top_indices[pt_idx]] = 1
-        else:
-            # Elevation-based fallback — activates when the bbox has terrain at or below
-            # sea level, regardless of whether any coastline way was fetched from OSM.
-            # Roads/parks painted at higher priority overwrite any misclassified town faces.
-            if self._terrain_interp is not None and self._min_elev <= 1.5:
-                face_elevs = self._terrain_interp(np.column_stack([cy_utm, cx_utm]))
-                color_idx[top_indices[face_elevs <= 1.5]] = 1
+                # Guard against the sea polygon over-extending onto elevated land
+                # (complex harbour coastlines can produce polygons that topologically
+                # include hillside cells).  Only paint faces at real sea level.
+                if self._terrain_interp is not None:
+                    face_elevs_sea = self._terrain_interp(
+                        np.column_stack([cy_utm[pt_idx], cx_utm[pt_idx]])
+                    )
+                    water_idx = pt_idx[face_elevs_sea <= 20.0]
+                else:
+                    water_idx = pt_idx
+                color_idx[top_indices[water_idx]] = 1
+
+        # Elevation-based supplement — always runs when sea is present, not just
+        # as a fallback.  Catches harbour/sea areas at model sea level that fall
+        # outside the sea polygon (e.g. enclosed harbours where the OSM coastline
+        # polygon over- or under-extends).
+        if self._terrain_interp is not None and self._min_elev <= 1.5:
+            face_elevs = self._terrain_interp(np.column_stack([cy_utm, cx_utm]))
+            color_idx[top_indices[face_elevs <= 1.5]] = 1
 
         # 2. Parks / green landuse / natural woodland
         park_geoms: list = []
@@ -1026,6 +1103,7 @@ class MapBuilder:
         self,
         terrain_mesh: trimesh.Trimesh,
         osm_data: dict,
+        width_mm: float = 1.5,
         base_colors: np.ndarray | None = None,
     ) -> np.ndarray:
         """Overlay race circuit features as slot 5 (route/red).
@@ -1034,6 +1112,7 @@ class MapBuilder:
         - roads layer filtered to highway=raceway (permanent circuits)
         - circuits layer with sport=motor (street/temporary circuits, e.g. Monaco)
 
+        width_mm is the strip half-width in model space (scale-independent).
         If base_colors is provided, raceway faces overwrite it; otherwise
         non-raceway faces default to terrain (0).
         """
@@ -1041,6 +1120,8 @@ class MapBuilder:
         from shapely.affinity import scale as _affine_scale
         from shapely.affinity import translate as _affine_translate
 
+        half_mm = width_mm / 2.0
+        real_m = half_mm * self.scale / 1000.0
         n_faces = len(terrain_mesh.faces)
         color_idx = (
             base_colors.copy()
@@ -1048,33 +1129,47 @@ class MapBuilder:
             else np.zeros(n_faces, dtype=np.int32)
         )
 
-        # Collect geometry from both sources
-        geoms = []
+        # Collect geometry from both sources separately — treatment differs below
+        raceway_geoms = []
         roads_utm = self._gdf_to_utm(osm_data, "roads")
         if roads_utm is not None and len(roads_utm) > 0:
             hw_col = roads_utm.get("highway")
             if hw_col is not None:
-                geoms.extend(roads_utm[hw_col == "raceway"].geometry.tolist())
+                raceway_geoms = roads_utm[hw_col == "raceway"].geometry.tolist()
 
+        circuit_geoms = []
         circuits_utm = self._gdf_to_utm(osm_data, "circuits")
         if circuits_utm is not None and len(circuits_utm) > 0:
-            geoms.extend(circuits_utm.geometry.tolist())
+            circuit_geoms = circuits_utm.geometry.tolist()
 
-        if not geoms:
+        # circuit_ways: full member-way geometries from a relation Overpass query
+        circuit_ways_utm = self._gdf_to_utm(osm_data, "circuit_ways")
+        if circuit_ways_utm is not None and len(circuit_ways_utm) > 0:
+            circuit_geoms.extend(circuit_ways_utm.geometry.tolist())
+
+        if not raceway_geoms and not circuit_geoms:
             print("  no raceway or circuit features found in this area")
             return color_idx
 
-        print(f"  {len(geoms)} raceway/circuit geometry feature(s) found")
+        geoms = (raceway_geoms, circuit_geoms)
+        print(
+            f"  {len(raceway_geoms)} highway=raceway, {len(circuit_geoms)} sport=motor feature(s)  "
+            f"strip width: {width_mm:.1f} mm on model  ({real_m:.0f} m real-world)"
+        )
 
-        buf_mm = _road_buffer_m("raceway") * self.mm_per_m
         centroids_mm = terrain_mesh.triangles_center[:, :2]
         pts = shapely.points(centroids_mm[:, 0], centroids_mm[:, 1])
 
+        # highway=raceway ways: line → buffer; area polygon → use directly (track surface)
+        # sport=motor circuit relations: always buffer the outline, even if osmnx
+        # assembles the closed loop into a Polygon — the interior is the enclosed area
+        # (harbour, pit lane, run-off), not the track itself.
+        raceway_geoms, circuit_geoms = geoms
+
         polys = []
-        for geom in geoms:
+        for geom in raceway_geoms:
             if geom is None or geom.is_empty:
                 continue
-            # Shift from UTM metres to model-mm coordinates
             geom_mm = _affine_scale(
                 _affine_translate(geom, -self.x_min, -self.y_min),
                 xfact=self.mm_per_m,
@@ -1082,11 +1177,30 @@ class MapBuilder:
                 origin=(0, 0),
             )
             if geom_mm.geom_type in ("LineString", "MultiLineString"):
-                polys.append(geom_mm.buffer(buf_mm))
+                polys.append(geom_mm.buffer(half_mm))
             elif geom_mm.geom_type == "Polygon":
-                polys.append(geom_mm)
+                polys.append(geom_mm)  # area=yes: polygon IS the track surface
             elif geom_mm.geom_type == "MultiPolygon":
                 polys.extend(geom_mm.geoms)
+
+        for geom in circuit_geoms:
+            if geom is None or geom.is_empty:
+                continue
+            geom_mm = _affine_scale(
+                _affine_translate(geom, -self.x_min, -self.y_min),
+                xfact=self.mm_per_m,
+                yfact=self.mm_per_m,
+                origin=(0, 0),
+            )
+            # Always buffer the outline — for a closed circuit the polygon interior
+            # is the infield, not the track.
+            if geom_mm.geom_type in ("LineString", "MultiLineString"):
+                polys.append(geom_mm.buffer(half_mm))
+            elif geom_mm.geom_type == "Polygon":
+                polys.append(geom_mm.exterior.buffer(half_mm))
+            elif geom_mm.geom_type == "MultiPolygon":
+                for part in geom_mm.geoms:
+                    polys.append(part.exterior.buffer(half_mm))
 
         if not polys:
             print("  no valid raceway geometries to paint")
@@ -1304,8 +1418,19 @@ def _apply_sea_mask(
     if len(idx) == 0:
         return elevation_arr
 
+    # Only zero cells that are actually at sea level.  The sea polygon can
+    # over-extend onto land (e.g. when a complex harbour coastline causes
+    # polygonize to include hillside cells on the topological sea side).
+    # Zeroing high-elevation cells flattens the terrain.
+    #
+    # GLO-30 sea cells are NaN (zeroed for open sea).
+    # AW3D30 / SRTM sea cells are 0.0 m.
+    # Any cell inside the polygon with elevation > 5 m is land — preserve it.
+    elev_flat = elevation_arr.ravel()
+    sea_idx = idx[np.isnan(elev_flat[idx]) | (elev_flat[idx] <= 5.0)]
+
     arr = elevation_arr.copy()
-    arr.ravel()[idx] = 0.0
+    arr.ravel()[sea_idx] = 0.0
     return arr
 
 

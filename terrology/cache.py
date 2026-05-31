@@ -82,6 +82,36 @@ def save_elevation(
 
 
 # ------------------------------------------------------------------ #
+# Circuit ways
+# ------------------------------------------------------------------ #
+
+
+def _circuit_ways_path(south: float, north: float, west: float, east: float) -> Path:
+    return (
+        CACHE_DIR
+        / "osm"
+        / _key(round(south, 4), round(north, 4), round(west, 4), round(east, 4))
+    )
+
+
+def load_circuit_ways(south: float, north: float, west: float, east: float):
+    pkl = _circuit_ways_path(south, north, west, east) / "circuit_ways.pkl"
+    if pkl.exists():
+        with open(pkl, "rb") as f:
+            return pickle.load(f)
+    return None
+
+
+def save_circuit_ways(
+    south: float, north: float, west: float, east: float, data
+) -> None:
+    path = _circuit_ways_path(south, north, west, east)
+    path.mkdir(parents=True, exist_ok=True)
+    with open(path / "circuit_ways.pkl", "wb") as f:
+        pickle.dump(data, f)
+
+
+# ------------------------------------------------------------------ #
 # Overture buildings
 # ------------------------------------------------------------------ #
 

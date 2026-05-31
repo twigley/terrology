@@ -54,6 +54,7 @@ def run_pipeline(
     border_width_mm: float = 0.0,
     dem_source: str = "glo30",
     raceway: bool = False,
+    raceway_width: float = 1.5,
 ) -> Path:
     """Run the terrology pipeline for a single lat/lon point with a radius.
 
@@ -67,6 +68,7 @@ def run_pipeline(
     from terrology.builder import MapBuilder, _utm_crs
     from terrology.exporter import export_3mf, export_color_stls, export_obj, export_stl
     from terrology.fetcher import (
+        fetch_circuit_ways,
         fetch_elevation,
         fetch_osm_data,
         fetch_overture_buildings,
@@ -169,6 +171,12 @@ def run_pipeline(
         f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
     )
 
+    if raceway:
+        print("  Fetching circuit relation member ways...")
+        osm_data["circuit_ways"] = fetch_circuit_ways(
+            osm_south, osm_north, osm_west, osm_east, use_cache=use_cache
+        )
+
     min_bldg_area = (
         min_building_area
         if min_building_area is not None
@@ -222,6 +230,7 @@ def run_pipeline(
         terrain_face_colors = builder.colorize_raceway(
             builder.terrain_surface_mesh,
             osm_data,
+            width_mm=raceway_width,
             base_colors=terrain_face_colors,
         )
 
@@ -313,6 +322,13 @@ def main() -> None:
         "--raceway",
         action="store_true",
         help="Highlight any race circuit (OSM highway=raceway) in the mapped area as a red overlay.",
+    )
+    parser.add_argument(
+        "--raceway-width",
+        type=float,
+        default=1.5,
+        help="Raceway strip width on the printed model in mm (default: 1.5). "
+        "Scale-independent — always this wide regardless of map area.",
     )
     parser.add_argument(
         "--buffer",
@@ -564,6 +580,7 @@ def main() -> None:
                 border_width_mm=args.border_width,
                 dem_source=args.dem,
                 raceway=args.raceway,
+                raceway_width=args.raceway_width,
             )
             return
         lat2, lon2 = _resolve_location(args.to)
@@ -731,6 +748,14 @@ def main() -> None:
             )
             ov_f = None
 
+    if args.raceway:
+        print("  Fetching circuit relation member ways...")
+        from terrology.fetcher import fetch_circuit_ways as _fetch_circuit_ways
+
+        osm_data["circuit_ways"] = _fetch_circuit_ways(
+            osm_south, osm_north, osm_west, osm_east, use_cache=use_cache
+        )
+
     # --- Terrain ---
     terrain_mesh = None
     if not args.no_terrain:
@@ -770,6 +795,7 @@ def main() -> None:
             terrain_face_colors = builder.colorize_raceway(
                 builder.terrain_surface_mesh,
                 osm_data,
+                width_mm=args.raceway_width,
                 base_colors=terrain_face_colors,
             )
         if args.route:

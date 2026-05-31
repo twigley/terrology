@@ -516,6 +516,63 @@ def _drop_tunnels(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf[keep]
 
 
+def fetch_circuit_ways(
+    south: float,
+    north: float,
+    west: float,
+    east: float,
+    use_cache: bool = True,
+) -> gpd.GeoDataFrame:
+    """Return a GeoDataFrame of all member ways of motorsport circuit relations
+    within the bbox, in WGS84.
+
+    Uses a direct Overpass query to expand relation members — necessary because
+    street circuits (e.g. Monaco) use normal highway ways that aren't
+    individually tagged sport=motor or highway=raceway.
+    """
+    from shapely.geometry import LineString
+
+    if use_cache:
+        cached = _cache.load_circuit_ways(south, north, west, east)
+        if cached is not None:
+            return cached
+
+    query = f"""
+[out:json][timeout:30];
+(
+  relation["sport"="motor"]({south:.5f},{west:.5f},{north:.5f},{east:.5f});
+  relation["type"="circuit"]({south:.5f},{west:.5f},{north:.5f},{east:.5f});
+);
+way(r);
+out geom;
+"""
+    try:
+        # Use osmnx's internal Overpass request — same headers, rate limiting,
+        # and endpoint as the main OSM fetch, so no separate API abuse.
+        response = ox._overpass._overpass_request(data={"data": query})
+        elements = response.get("elements", [])
+    except Exception as exc:
+        print(f"  WARNING: circuit way fetch failed: {exc}")
+        gdf = gpd.GeoDataFrame(geometry=[], crs="EPSG:4326")
+        return gdf
+
+    geoms = []
+    for el in elements:
+        if el.get("type") != "way" or "geometry" not in el:
+            continue
+        coords = [(n["lon"], n["lat"]) for n in el["geometry"]]
+        if len(coords) >= 2:
+            geoms.append(LineString(coords))
+
+    gdf = gpd.GeoDataFrame(geometry=geoms, crs="EPSG:4326")
+    print(f"  circuit relation member ways: {len(gdf)} ways fetched")
+
+    if use_cache:
+        _cache.save_circuit_ways(south, north, west, east, gdf)
+
+    return gdf
+
+
 def _parse_aaigrid(text: str) -> tuple[np.ndarray, dict]:
     lines = text.strip().splitlines()
     header: dict[str, float] = {}
