@@ -61,6 +61,10 @@ def _clip_mesh_to_polygon(mesh, clip_poly_mm):
     clip_poly_mm (model mm XY coordinates). Returns the clipped mesh.
     Requires manifold3d (used automatically by trimesh 4.x).
     """
+    # extrude_polygon requires a single Polygon — take the largest part of a MultiPolygon.
+    if clip_poly_mm.geom_type == "MultiPolygon":
+        clip_poly_mm = max(clip_poly_mm.geoms, key=lambda p: p.area)
+
     z_lo, z_hi = float(mesh.bounds[0][2]), float(mesh.bounds[1][2])
     height = (z_hi - z_lo) + 20.0  # 10 mm margin each side
     prism = trimesh.creation.extrude_polygon(clip_poly_mm, height=height)
@@ -93,6 +97,7 @@ class MapBuilder:
         building_exag: float | None = None,
         min_building_area_m2: float = 4.0,
         water_depth_mm: float = 0.8,
+        resolution_m: float = 0.0,
     ):
         self.lat = lat
         self.lon = lon
@@ -117,6 +122,9 @@ class MapBuilder:
         self.color_grid_size = color_grid_size
         self.min_building_area_m2 = min_building_area_m2
         self.water_depth_mm = water_depth_mm
+        self.resolution_m = (
+            resolution_m  # real-world metres per colour-grid cell; 0 = no skipping
+        )
         self.clip_poly = clip_poly  # UTM metres, or None
         if clip_poly is not None:
             from shapely.affinity import scale as _affine_scale
@@ -538,32 +546,39 @@ class MapBuilder:
             idx, _ = STRtree(elevated_geoms).query(pts, predicate="covered_by")
             elevated_mask[idx] = True
 
-        # Roads/railways are applied per-layer (different depression amount).
-        for layer_name, line_buf in [("roads", 4.0), ("railways", 4.0)]:
-            gdf_utm = self._gdf_to_utm(osm_data, layer_name)
-            if gdf_utm is None:
-                continue
-            if "bridge" in gdf_utm.columns:
-                keep = (
-                    gdf_utm["bridge"].isna()
-                    | (gdf_utm["bridge"] == "no")
-                    | (gdf_utm["bridge"] == False)  # noqa: E712
-                )
-                gdf_utm = gdf_utm[keep]
-            geoms = []
-            for geom in gdf_utm.geometry:
-                if geom is None or geom.is_empty:
+        # Real-world size of one base-grid cell — features smaller than half this
+        # can never land on a grid point, so their depression is a no-op.
+        base_cell_m = (
+            max(self.x_max - self.x_min, self.y_max - self.y_min) / self.grid_size
+        )
+
+        # Roads/railways — buffer is 4 m; skip when sub-cell (no grid point can fall inside).
+        if 4.0 >= base_cell_m / 2:
+            for layer_name, line_buf in [("roads", 4.0), ("railways", 4.0)]:
+                gdf_utm = self._gdf_to_utm(osm_data, layer_name)
+                if gdf_utm is None:
                     continue
-                if geom.geom_type in ("LineString", "MultiLineString"):
-                    geom = geom.buffer(line_buf)
-                geoms.append(geom)
-            if not geoms:
-                continue
-            pt_idx, _ = STRtree(geoms).query(pts, predicate="within")
-            if len(pt_idx):
-                mask = np.zeros(len(pts), dtype=bool)
-                mask[pt_idx] = True
-                elev.ravel()[mask] -= _ROAD_DEPRESS_M
+                if "bridge" in gdf_utm.columns:
+                    keep = (
+                        gdf_utm["bridge"].isna()
+                        | (gdf_utm["bridge"] == "no")
+                        | (gdf_utm["bridge"] == False)  # noqa: E712
+                    )
+                    gdf_utm = gdf_utm[keep]
+                geoms = []
+                for geom in gdf_utm.geometry:
+                    if geom is None or geom.is_empty:
+                        continue
+                    if geom.geom_type in ("LineString", "MultiLineString"):
+                        geom = geom.buffer(line_buf)
+                    geoms.append(geom)
+                if not geoms:
+                    continue
+                pt_idx, _ = STRtree(geoms).query(pts, predicate="within")
+                if len(pt_idx):
+                    mask = np.zeros(len(pts), dtype=bool)
+                    mask[pt_idx] = True
+                    elev.ravel()[mask] -= _ROAD_DEPRESS_M
 
         # All water layers share the same depression depth — accumulate into one mask
         # so overlapping features (e.g. a river LineString + its area polygon) are
@@ -586,6 +601,8 @@ class MapBuilder:
                 if geom is None or geom.is_empty:
                     continue
                 if line_buf > 0 and geom.geom_type in ("LineString", "MultiLineString"):
+                    if line_buf < base_cell_m / 2:
+                        continue  # sub-cell waterway line — no grid point can fall inside
                     geom = geom.buffer(line_buf)
                 geoms.append(geom)
             if not geoms:
@@ -936,6 +953,8 @@ class MapBuilder:
                     continue
                 if geom.geom_type in ("LineString", "MultiLineString"):
                     buf = 6.0 if str(wtype) in _WIDE_WATERWAYS else 2.0
+                    if self.resolution_m > 0 and buf < self.resolution_m / 2:
+                        continue  # sub-cell waterway line
                     water_geoms.append(geom.buffer(buf))
                 elif geom.geom_type in ("Polygon", "MultiPolygon"):
                     water_geoms.append(geom)
@@ -945,6 +964,9 @@ class MapBuilder:
         _paint_tree(water_geoms, 1)
 
         # 3. Roads — vectorised buffer then bulk STRtree query
+        # Line roads are only resolvable when their buffer >= half a colour cell.
+        # Polygon roads (pedestrian areas etc.) are always kept — they're area features.
+        min_road_buf = self.resolution_m / 2 if self.resolution_m > 0 else 0.0
         road_geoms: list = []
         g = self._gdf_to_utm(osm_data, "roads")
         if g is not None:
@@ -966,6 +988,8 @@ class MapBuilder:
                     for geom in geom_arr
                 ]
             )
+            if min_road_buf > 0:
+                line_mask &= dists >= min_road_buf  # drop sub-cell road tiers
             poly_mask = np.array(
                 [
                     geom is not None
@@ -979,16 +1003,18 @@ class MapBuilder:
             if poly_mask.any():
                 road_geoms.extend(geom_arr[poly_mask])
         # Railways — own colour slot (collapsed to roads by _limit_colors when n<6)
-        g = self._gdf_to_utm(osm_data, "railways")
-        if g is not None:
-            rail_geoms = [
-                geom.buffer(4.0)
-                for geom in g.geometry
-                if geom is not None
-                and not geom.is_empty
-                and geom.geom_type in ("LineString", "MultiLineString")
-            ]
-            _paint_tree(rail_geoms, 6)
+        # Railway buffer is 4 m; skip when sub-cell.
+        if min_road_buf <= 4.0:
+            g = self._gdf_to_utm(osm_data, "railways")
+            if g is not None:
+                rail_geoms = [
+                    geom.buffer(4.0)
+                    for geom in g.geometry
+                    if geom is not None
+                    and not geom.is_empty
+                    and geom.geom_type in ("LineString", "MultiLineString")
+                ]
+                _paint_tree(rail_geoms, 6)
 
         # Paved polygon areas share the roads colour slot
         for src in ("pedestrian_areas", "parking"):

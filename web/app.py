@@ -47,7 +47,10 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 class JobParams(BaseModel):
     lat: float | None = Field(None, ge=-90, le=90)
     lon: float | None = Field(None, ge=-180, le=180)
-    radius: float = Field(500, ge=100, le=5000)
+    # Upper bound: 800 colour-grid cells × 10 m major-road half-width = 8000 m,
+    # the radius at which even primary roads (20 m wide) are exactly one colour cell.
+    # Beyond this only area features (water, parks) and terrain shape are visible.
+    radius: float = Field(500, ge=100, le=8000)
     shape: str = Field("square", pattern="^(square|circle|hexagon)$")
     polygon: list[list[float]] | None = None  # [[lng, lat], ...] GeoJSON ring
     terrain_exag: float = Field(2.0, ge=1.0, le=4.0)

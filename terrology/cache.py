@@ -17,24 +17,42 @@ def _key(*args) -> str:
 # ------------------------------------------------------------------ #
 
 
-def _osm_path(south: float, north: float, west: float, east: float) -> Path:
-    return (
-        CACHE_DIR
-        / "osm"
-        / _key(round(south, 4), round(north, 4), round(west, 4), round(east, 4))
-    )
+def _osm_path(
+    south: float,
+    north: float,
+    west: float,
+    east: float,
+    skip_layers: frozenset[str] | None = None,
+) -> Path:
+    key_args = [round(south, 4), round(north, 4), round(west, 4), round(east, 4)]
+    if skip_layers:
+        key_args.append(sorted(skip_layers))  # sorted for a stable key
+    return CACHE_DIR / "osm" / _key(*key_args)
 
 
-def load_osm(south: float, north: float, west: float, east: float) -> dict | None:
-    pkl = _osm_path(south, north, west, east) / "features.pkl"
+def load_osm(
+    south: float,
+    north: float,
+    west: float,
+    east: float,
+    skip_layers: frozenset[str] | None = None,
+) -> dict | None:
+    pkl = _osm_path(south, north, west, east, skip_layers) / "features.pkl"
     if pkl.exists():
         with open(pkl, "rb") as f:
             return pickle.load(f)
     return None
 
 
-def save_osm(south: float, north: float, west: float, east: float, data: dict) -> None:
-    path = _osm_path(south, north, west, east)
+def save_osm(
+    south: float,
+    north: float,
+    west: float,
+    east: float,
+    data: dict,
+    skip_layers: frozenset[str] | None = None,
+) -> None:
+    path = _osm_path(south, north, west, east, skip_layers)
     path.mkdir(parents=True, exist_ok=True)
     with open(path / "features.pkl", "wb") as f:
         pickle.dump(data, f)

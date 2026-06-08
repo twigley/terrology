@@ -125,14 +125,35 @@ def run_pipeline(
     )  # terrain base: cap at printable resolution
     actual_color_grid = min(color_grid_size, max_useful)
 
+    # Real-world metres per colour-grid cell — drives feature skip logic in the builder.
+    resolution_m = max(x_span_m, y_span_m) / actual_color_grid
+
+    # Auto-skip buildings when a 20 m building would be shorter than 2 nozzle widths.
+    # 20 m is a typical 6-storey building; below 2 nozzle widths it won't print reliably.
+    _eff_bldg_exag = building_exag if building_exag is not None else terrain_exag
+    _bldg_height_mm = 20.0 * _eff_bldg_exag * 1000.0 / actual_scale
+    if not no_buildings and _bldg_height_mm < 2 * nozzle:
+        no_buildings = True
+        _auto_skip_bldg = f"{_bldg_height_mm:.2f} mm"
+    else:
+        _auto_skip_bldg = None
+
     print(f"\nLocation  : {lat:.5f}, {lon:.5f}")
     print(f"Radius    : {radius} m   |   Scale: 1:{actual_scale:.0f}")
     print(f"Model size: {model_x_mm:.1f} x {model_y_mm:.1f} mm")
+    _skipped = _skipped_features(resolution_m)
+    if _skipped:
+        print(f"Resolution: {resolution_m:.1f} m/cell — skipping {_skipped} (sub-cell)")
+    if _auto_skip_bldg:
+        print(
+            f"Buildings : skipped — 20 m building = {_auto_skip_bldg} at this scale (sub-nozzle)"
+        )
     print(f"Output    : {out_dir.resolve()}\n")
 
     use_cache = not no_cache
     elev_pad = 0.02
 
+    osm_skip = _skip_osm_layers(resolution_m, no_buildings)
     print("Fetching OSM, elevation and Overture data in parallel...")
     with ThreadPoolExecutor(max_workers=3) as executor:
         osm_f = executor.submit(
@@ -142,6 +163,7 @@ def run_pipeline(
             west=osm_west,
             east=osm_east,
             use_cache=use_cache,
+            skip_layers=osm_skip,
         )
         elev_f = executor.submit(
             fetch_elevation,
@@ -198,6 +220,7 @@ def run_pipeline(
         building_exag=building_exag,
         min_building_area_m2=min_bldg_area,
         water_depth_mm=water_depth_mm,
+        resolution_m=resolution_m,
     )
 
     print(f"\nBuilding terrain mesh ({actual_grid}x{actual_grid})...")
@@ -288,6 +311,52 @@ def run_pipeline(
     return out_dir
 
 
+def _skip_osm_layers(resolution_m: float, no_buildings: bool) -> frozenset[str]:
+    """OSM layer names safe to omit from the Overpass query at this resolution.
+
+    A linear feature is only resolvable when its buffer >= resolution_m / 2.
+    Area features (water, parks) are never skipped — they scale with feature size.
+    """
+    skip: set[str] = set()
+    if no_buildings:
+        skip.update({"buildings", "building_parts"})
+    min_buf = resolution_m / 2
+    if min_buf > 4.0:  # roads (max 10 m), railways (4 m), piers, road-type areas
+        skip.update(
+            {
+                "roads",
+                "railways",
+                "pedestrian_areas",
+                "parking",
+                "aeroways",
+                "piers",
+                "circuits",
+            }
+        )
+    if min_buf > 6.0:  # wide rivers/canals (6 m buffer)
+        skip.add("waterways")
+    return frozenset(skip)
+
+
+def _skipped_features(resolution_m: float) -> str:
+    """Return a human-readable list of linear OSM feature tiers skipped at this resolution.
+
+    A linear feature is only resolvable when its buffer >= resolution_m / 2.
+    Buffers: paths 1.5 m, minor roads 4 m, secondary roads 6 m, major roads 10 m.
+    """
+    min_buf = resolution_m / 2
+    skipped = []
+    if min_buf > 1.5:
+        skipped.append("paths")
+    if min_buf > 4.0:
+        skipped.append("minor roads + railways")
+    if min_buf > 6.0:
+        skipped.append("secondary roads")
+    if min_buf > 10.0:
+        skipped.append("all roads")
+    return ", ".join(skipped)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Generate 3D-printable terrain + building models from OSM data",
@@ -342,6 +411,21 @@ def main() -> None:
         type=float,
         default=500,
         help="Radius in metres from the centre point (default: 500). Ignored when --to is given.",
+    )
+    parser.add_argument(
+        "--shape",
+        default="square",
+        choices=["square", "circle", "hexagon"],
+        help="Clip shape (default: square). circle and hexagon clip the terrain to that outline. "
+        "In single-point mode the radius sets the clip size; with --to/--route the bounding box "
+        "diagonal is used. --area already defines its own polygon so --shape is ignored there.",
+    )
+    parser.add_argument(
+        "--shape-center",
+        default=None,
+        metavar="LAT,LON_OR_PLACE",
+        help="Override the centre point for circle/hexagon shapes. "
+        "Accepts 'lat,lon' or a place name. Ignored when --shape square or --area.",
     )
     parser.add_argument(
         "--size",
@@ -538,6 +622,14 @@ def main() -> None:
         x_min, x_max, y_min, y_max = _bbox_with_buffer(
             [ab[0], ab[2]], [ab[1], ab[3]], args.buffer
         )
+
+        if args.route:
+            from terrology.gpx import parse_gpx
+
+            route_latlon = parse_gpx(Path(args.route))
+            print(f"  GPX: {len(route_latlon):,} track points")
+            route_utm = [to_utm.transform(plon, plat) for plat, plon in route_latlon]
+
     elif args.route:
         from terrology.gpx import parse_gpx
 
@@ -557,10 +649,20 @@ def main() -> None:
         lat1, lon1 = _resolve_location(args.location)
         if not args.to:
             # Single-point mode — delegate entirely to run_pipeline
+            if args.shape != "square":
+                if args.shape_center:
+                    sc_lat, sc_lon = _resolve_location(args.shape_center)
+                else:
+                    sc_lat, sc_lon = lat1, lon1
+                _clip_poly = make_shape_polygon(sc_lat, sc_lon, args.radius, args.shape)
+            else:
+                sc_lat, sc_lon = lat1, lon1
+                _clip_poly = None
             run_pipeline(
-                lat=lat1,
-                lon=lon1,
+                lat=sc_lat,
+                lon=sc_lon,
                 radius=args.radius,
+                clip_polygon_wgs84=_clip_poly,
                 scale=args.scale,
                 size=args.size,
                 terrain_exag=args.terrain_exag,
@@ -593,6 +695,35 @@ def main() -> None:
 
     x_span_m = x_max - x_min
     y_span_m = y_max - y_min
+
+    # Shape clipping for --to and --route: clip model to circle/hexagon.
+    # --area already has its own polygon; single-point mode is handled in run_pipeline().
+    if args.shape != "square" and area_poly_utm is None:
+        from shapely.geometry import Point
+        from shapely.geometry import Polygon as _Polygon
+
+        r = max(x_span_m, y_span_m) / 2
+
+        if args.shape_center:
+            sc_lat, sc_lon = _resolve_location(args.shape_center)
+            cx_utm, cy_utm = to_utm.transform(sc_lon, sc_lat)
+        else:
+            cx_utm = (x_min + x_max) / 2
+            cy_utm = (y_min + y_max) / 2
+
+        # Expand the data bbox to a square so the circle/hexagon never extends
+        # past the fetched terrain boundary and gets clipped to a flat edge.
+        x_min, x_max = cx_utm - r, cx_utm + r
+        y_min, y_max = cy_utm - r, cy_utm + r
+        x_span_m = y_span_m = r * 2
+
+        if args.shape == "circle":
+            area_poly_utm = Point(cx_utm, cy_utm).buffer(r, resolution=64)
+        else:  # hexagon
+            angles = [i * 2 * math.pi / 6 for i in range(6)]
+            area_poly_utm = _Polygon(
+                [(cx_utm + r * math.cos(a), cy_utm + r * math.sin(a)) for a in angles]
+            )
 
     if args.scale is not None:
         scale = args.scale
@@ -627,7 +758,12 @@ def main() -> None:
             f"(~{approx_after:,} faces, was ~{approx_before:,})"
         )
 
-    if args.area:
+    if args.area and args.route:
+        print(
+            f"\nArea      : {Path(args.area).name} + {Path(args.route).name}  |  "
+            f"Span: {x_span_m:.0f} x {y_span_m:.0f} m  |  Scale: 1:{scale:.0f}"
+        )
+    elif args.area:
         print(
             f"\nArea      : {Path(args.area).name}  |  "
             f"Span: {x_span_m:.0f} x {y_span_m:.0f} m  |  Scale: 1:{scale:.0f}"
@@ -643,7 +779,27 @@ def main() -> None:
         print(
             f"Span      : {x_span_m:.0f} x {y_span_m:.0f} m   |   Scale: 1:{scale:.0f}"
         )
+    resolution_m = max(x_span_m, y_span_m) / color_grid_size
+
+    _eff_bldg_exag = (
+        args.building_exag if args.building_exag is not None else args.terrain_exag
+    )
+    _bldg_height_mm = 20.0 * _eff_bldg_exag * 1000.0 / scale
+    no_buildings = args.no_buildings
+    if not no_buildings and _bldg_height_mm < 2 * args.nozzle:
+        no_buildings = True
+        _auto_skip_bldg = f"{_bldg_height_mm:.2f} mm"
+    else:
+        _auto_skip_bldg = None
+
     print(f"Model size: {model_x_mm:.1f} x {model_y_mm:.1f} mm")
+    _skipped = _skipped_features(resolution_m)
+    if _skipped:
+        print(f"Resolution: {resolution_m:.1f} m/cell — skipping {_skipped} (sub-cell)")
+    if _auto_skip_bldg:
+        print(
+            f"Buildings : skipped — 20 m building = {_auto_skip_bldg} at this scale (sub-nozzle)"
+        )
     print(f"Output    : {out_dir.resolve()}\n")
 
     use_cache = not args.no_cache
@@ -670,14 +826,16 @@ def main() -> None:
         building_exag=args.building_exag,
         min_building_area_m2=min_bldg_area,
         water_depth_mm=args.water_depth,
+        resolution_m=resolution_m,
     )
 
     # Fetch elevation, OSM features, and Overture buildings in parallel
+    osm_skip = _skip_osm_layers(resolution_m, no_buildings)
     elevation = header = None
     if not args.no_terrain:
         from concurrent.futures import ThreadPoolExecutor
 
-        _need_ov = not args.no_buildings
+        _need_ov = not no_buildings
         print("Fetching OSM, elevation and Overture data in parallel...")
         with ThreadPoolExecutor(max_workers=3) as executor:
             osm_f = executor.submit(
@@ -687,6 +845,7 @@ def main() -> None:
                 west=osm_west,
                 east=osm_east,
                 use_cache=use_cache,
+                skip_layers=osm_skip,
             )
             elev_f = executor.submit(
                 fetch_elevation,
@@ -716,7 +875,7 @@ def main() -> None:
             f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
         )
     else:
-        _need_ov = not args.no_buildings
+        _need_ov = not no_buildings
         if _need_ov:
             print("Fetching OSM and Overture data in parallel...")
             with ThreadPoolExecutor(max_workers=2) as executor:
@@ -727,6 +886,7 @@ def main() -> None:
                     west=osm_west,
                     east=osm_east,
                     use_cache=use_cache,
+                    skip_layers=osm_skip,
                 )
                 ov_f = executor.submit(
                     fetch_overture_buildings,
@@ -745,6 +905,7 @@ def main() -> None:
                 west=osm_west,
                 east=osm_east,
                 use_cache=use_cache,
+                skip_layers=osm_skip,
             )
             ov_f = None
 
@@ -765,13 +926,13 @@ def main() -> None:
         export_stl(terrain_mesh, out_dir / "terrain.stl")
 
     # --- Buildings ---
-    if not args.no_buildings:
+    if not no_buildings:
         osm_data["buildings"] = supplement_buildings(
             osm_data.get("buildings"), ov_f.result()
         )
 
     buildings_mesh = None
-    if not args.no_buildings:
+    if not no_buildings:
         print("\nExtruding buildings...")
         buildings_mesh = builder.build_buildings(
             osm_data, with_roof_shapes=args.roof_shapes
@@ -909,14 +1070,33 @@ def _load_area_polygon(path: str):
     import json
 
     from shapely.geometry import shape
+    from shapely.ops import polygonize, unary_union
 
     with open(path) as f:
         data = json.load(f)
     if data.get("type") == "FeatureCollection":
-        return shape(data["features"][0]["geometry"])
-    if data.get("type") == "Feature":
-        return shape(data["geometry"])
-    return shape(data)
+        geom = shape(data["features"][0]["geometry"])
+    elif data.get("type") == "Feature":
+        geom = shape(data["geometry"])
+    else:
+        geom = shape(data)
+
+    # Some exporters write island boundaries as LineString/MultiLineString rings.
+    # Polygonize them so downstream code always gets a Polygon or MultiPolygon.
+    if geom.geom_type in ("LineString", "MultiLineString"):
+        polys = list(polygonize(geom))
+        if not polys:
+            raise ValueError(
+                f"GeoJSON LineString in {path} could not be converted to a polygon "
+                "(ring may not be closed)"
+            )
+        geom = polys[0] if len(polys) == 1 else unary_union(polys)
+
+    if geom.geom_type not in ("Polygon", "MultiPolygon"):
+        raise ValueError(
+            f"GeoJSON geometry must be Polygon or MultiPolygon, got {geom.geom_type!r}"
+        )
+    return geom
 
 
 def _setup_utm(lat: float, lon: float):
@@ -929,6 +1109,30 @@ def _setup_utm(lat: float, lon: float):
     to_utm = Transformer.from_crs(wgs84, utm_crs, always_xy=True)
     from_utm = Transformer.from_crs(utm_crs, wgs84, always_xy=True)
     return utm_crs, to_utm, from_utm
+
+
+def make_shape_polygon(lat: float, lon: float, radius: float, shape: str):
+    """Return a WGS84 shapely Polygon clipped to shape, centred at lat/lon with given radius."""
+    import math
+
+    from shapely.geometry import Point, Polygon
+    from shapely.ops import transform as _shp_transform
+
+    _, to_utm, from_utm = _setup_utm(lat, lon)
+    cx, cy = to_utm.transform(lon, lat)
+
+    if shape == "circle":
+        poly_utm = Point(cx, cy).buffer(radius, resolution=64)
+    elif shape == "hexagon":
+        angles = [i * 2 * math.pi / 6 for i in range(6)]
+        points = [
+            (cx + radius * math.cos(a), cy + radius * math.sin(a)) for a in angles
+        ]
+        poly_utm = Polygon(points)
+    else:
+        raise ValueError(f"Unknown shape: {shape!r}")
+
+    return _shp_transform(lambda x, y: from_utm.transform(x, y), poly_utm)
 
 
 def _bbox_with_buffer(

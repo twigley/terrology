@@ -118,9 +118,10 @@ def fetch_osm_data(
     west: float,
     east: float,
     use_cache: bool = True,
+    skip_layers: frozenset[str] | None = None,
 ) -> dict:
     if use_cache:
-        cached = _cache.load_osm(south, north, west, east)
+        cached = _cache.load_osm(south, north, west, east, skip_layers)
         if cached is not None:
             total = sum(len(v) for v in cached.values() if v is not None)
             print(f"  (cache hit — {total} features across {len(cached)} layers)")
@@ -141,11 +142,12 @@ def fetch_osm_data(
         north + _COAST_PAD,
     )
 
-    # Merge all non-coastline tags into one combined query (2 Overpass requests
-    # total instead of 17) to avoid rate-limiting delays.
+    skip = skip_layers or frozenset()
+
+    # Merge non-coastline, non-skipped tags into one combined query.
     combined_tags: dict = {}
     for name, tags in OSM_TAGS.items():
-        if name == "coastlines":
+        if name == "coastlines" or name in skip:
             continue
         for k, v in tags.items():
             if k not in combined_tags:
@@ -162,6 +164,8 @@ def fetch_osm_data(
                 combined_tags[k] = existing + [x for x in new if x not in existing]
 
     def _fetch_combined():
+        if not combined_tags:
+            return gpd.GeoDataFrame()
         try:
             return ox.features_from_bbox(bbox, tags=combined_tags)
         except Exception as exc:
@@ -175,18 +179,26 @@ def fetch_osm_data(
             print(f"  WARNING: OSM coastline fetch failed: {exc}")
             return gpd.GeoDataFrame()
 
-    print("  Fetching OSM features (2 requests)...")
+    n_requests = (1 if combined_tags else 0) + 1  # always fetch coastlines
+    skipped_note = f" ({len(skip)} layers skipped)" if skip else ""
+    print(
+        f"  Fetching OSM features ({n_requests} request{'s' if n_requests > 1 else ''}){skipped_note}..."
+    )
     with ThreadPoolExecutor(max_workers=2) as executor:
         combined_f = executor.submit(_fetch_combined)
         coast_f = executor.submit(_fetch_coastlines)
         combined_gdf = combined_f.result()
         coast_gdf = coast_f.result()
 
-    # Split the combined result back into per-category GeoDataFrames
+    # Split the combined result back into per-category GeoDataFrames.
+    # Skipped layers get an empty GeoDataFrame so downstream code sees a consistent dict.
     result: dict = {}
     for name, tags in OSM_TAGS.items():
         if name == "coastlines":
             result["coastlines"] = coast_gdf
+            continue
+        if name in skip:
+            result[name] = gpd.GeoDataFrame()
             continue
         gdf = _filter_gdf(combined_gdf, tags)
         if name in ("roads", "railways", "waterways"):
@@ -197,7 +209,7 @@ def fetch_osm_data(
     print(f"  {total_features:,} features across {len(result)} layers")
 
     if use_cache and total_features > 0:
-        _cache.save_osm(south, north, west, east, result)
+        _cache.save_osm(south, north, west, east, result, skip_layers)
     elif use_cache and total_features == 0:
         print("  (skipping cache — 0 features, likely a fetch error)")
 

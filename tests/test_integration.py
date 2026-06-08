@@ -316,7 +316,10 @@ def test_7color_road_and_water_in_mtl(tmp_path):
         patch("terrology.fetcher.fetch_osm_data", return_value=osm),
         patch("terrology.fetcher.fetch_elevation", return_value=_flat_elev()),
     ):
-        run_pipeline(**_FAST, output_dir=tmp_path, colors=7, skip_stls=False)
+        # color_grid_size=30: resolution_m = 2*300/30 = 20 m → primary road buffer
+        # (10 m) is exactly at the half-cell threshold and is not skipped.
+        params = {**_FAST, "color_grid_size": 30}
+        run_pipeline(**params, output_dir=tmp_path, colors=7, skip_stls=False)
 
     mtl = (tmp_path / "model.mtl").read_text()
     assert "newmtl water" in mtl

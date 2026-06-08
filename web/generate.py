@@ -1,44 +1,15 @@
 from __future__ import annotations
 
 import json
-import math
 import multiprocessing
 import os
 from datetime import UTC, datetime
 from pathlib import Path
 
+from terrology.cli import make_shape_polygon as _make_shape_polygon
 from web.jobs import JobStatus, store
 
 _JOB_DIR = Path(os.environ.get("TERROLOGY_JOB_DIR", "/tmp/terrology"))
-
-
-def _make_shape_polygon(lat: float, lon: float, radius: float, shape: str):
-    """Return a WGS84 shapely Polygon for the requested shape centred at lat/lon."""
-    from pyproj import CRS, Transformer
-    from shapely.geometry import Point, Polygon
-    from shapely.ops import transform as _shp_transform
-
-    from terrology.builder import _utm_crs
-
-    utm_crs = _utm_crs(lon, lat)
-    wgs84 = CRS.from_epsg(4326)
-    to_utm = Transformer.from_crs(wgs84, utm_crs, always_xy=True)
-    from_utm = Transformer.from_crs(utm_crs, wgs84, always_xy=True)
-
-    cx, cy = to_utm.transform(lon, lat)
-
-    if shape == "circle":
-        poly_utm = Point(cx, cy).buffer(radius, resolution=64)
-    elif shape == "hexagon":
-        angles = [i * 2 * math.pi / 6 for i in range(6)]  # flat top + bottom
-        points = [
-            (cx + radius * math.cos(a), cy + radius * math.sin(a)) for a in angles
-        ]
-        poly_utm = Polygon(points)
-    else:
-        raise ValueError(f"Unknown shape: {shape!r}")
-
-    return _shp_transform(lambda x, y: from_utm.transform(x, y), poly_utm)
 
 
 def _worker(params_json: str, out_dir_str: str) -> None:
