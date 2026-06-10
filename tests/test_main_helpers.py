@@ -249,3 +249,30 @@ def test_load_area_uses_first_feature(tmp_path):
     poly = _load_area_polygon(_write_geojson(tmp_path, data))
     # First feature's bounds, not second
     assert poly.bounds[0] < 5
+
+
+# ------------------------------------------------------------------ #
+# _skip_osm_layers — forced waterways
+# ------------------------------------------------------------------ #
+
+
+def test_skip_osm_layers_drops_waterways_at_coarse_resolution():
+    from terrology.cli import _skip_osm_layers
+
+    skip = _skip_osm_layers(30.0, no_buildings=False)
+    assert "waterways" in skip
+
+
+def test_skip_osm_layers_force_waterways_keeps_layer():
+    """--waterways overrides the coarse-scale skip without affecting other layers."""
+    from terrology.cli import _skip_osm_layers
+
+    skip = _skip_osm_layers(30.0, no_buildings=False, force_waterways=True)
+    assert "waterways" not in skip
+    assert "roads" in skip
+
+
+def test_skip_osm_layers_fine_resolution_keeps_waterways():
+    from terrology.cli import _skip_osm_layers
+
+    assert "waterways" not in _skip_osm_layers(4.0, no_buildings=False)

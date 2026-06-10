@@ -19,7 +19,7 @@ from terrology.builder import MapBuilder, _heightfield_layer
 UTM_EPSG = "EPSG:32630"  # zone 30N, matches lon=-0.12
 
 
-def _builder(sea_poly=None, water_depth_mm=0.8, n=10, extent=1000.0):
+def _builder(sea_poly=None, water_depth_mm=0.8, n=10, extent=1000.0, resolution_m=0.0):
     b = MapBuilder(
         lat=51.5,
         lon=-0.12,
@@ -32,6 +32,7 @@ def _builder(sea_poly=None, water_depth_mm=0.8, n=10, extent=1000.0):
         grid_size=n,
         color_grid_size=n,
         water_depth_mm=water_depth_mm,
+        resolution_m=resolution_m,
     )
     b._min_elev = 0.0
     b._sea_poly = sea_poly
@@ -380,3 +381,99 @@ def test_colorize_raceway_circuit_relation():
     colors = b.colorize_raceway(mesh, osm_data)
     assert (colors == 5).any(), "circuit relation faces must be painted slot 5"
     assert (colors == 0).any(), "faces outside circuit must remain terrain (0)"
+
+
+# ------------------------------------------------------------------ #
+# Forced waterways (--waterways)
+# ------------------------------------------------------------------ #
+
+
+def _waterway_osm_data(geom, wtype="river"):
+    """Build a minimal osm_data dict with a single waterway feature."""
+    import geopandas as gpd
+
+    gdf = gpd.GeoDataFrame({"waterway": [wtype]}, geometry=[geom], crs=UTM_EPSG)
+    return {"waterways": gdf}
+
+
+def _flat_mesh(n, extent_m, scale=5000):
+    extent_mm = extent_m / scale * 1000
+    x_mm = np.linspace(0, extent_mm, n)
+    y_mm = np.linspace(0, extent_mm, n)
+    xg, yg = np.meshgrid(x_mm, y_mm)
+    return _heightfield_layer(xg, yg, np.zeros_like(xg), np.full_like(xg, -3.0))
+
+
+def test_river_skipped_at_coarse_resolution():
+    """At coarse resolution a river line is sub-cell and not painted."""
+    from shapely.geometry import LineString
+
+    n, extent_m = 20, 1000.0
+    mesh = _flat_mesh(n, extent_m)
+    b = _builder(n=n, extent=extent_m, resolution_m=100.0)
+    osm_data = _waterway_osm_data(LineString([(0.0, 0.0), (extent_m, extent_m)]))
+
+    colors = b.colorize_terrain(mesh, osm_data)
+    assert not (colors == 1).any(), "sub-cell river must be skipped without forcing"
+
+
+def test_river_forced_at_coarse_resolution():
+    """waterway_min_width_mm forces rivers through the sub-cell skip as slot 1."""
+    from shapely.geometry import LineString
+
+    n, extent_m = 20, 1000.0
+    mesh = _flat_mesh(n, extent_m)
+    b = _builder(n=n, extent=extent_m, resolution_m=100.0)
+    osm_data = _waterway_osm_data(LineString([(0.0, 0.0), (extent_m, extent_m)]))
+
+    colors = b.colorize_terrain(mesh, osm_data, waterway_min_width_mm=1.0)
+    assert (colors == 1).any(), "forced river must be painted water (slot 1)"
+
+
+def test_stream_forced_at_coarse_resolution():
+    """Natural streams are forced too — e.g. Eifel brooks around the Nordschleife
+    are tagged waterway=stream, not river."""
+    from shapely.geometry import LineString
+
+    n, extent_m = 20, 1000.0
+    mesh = _flat_mesh(n, extent_m)
+    b = _builder(n=n, extent=extent_m, resolution_m=100.0)
+    osm_data = _waterway_osm_data(
+        LineString([(0.0, 0.0), (extent_m, extent_m)]), wtype="stream"
+    )
+
+    colors = b.colorize_terrain(mesh, osm_data, waterway_min_width_mm=1.0)
+    assert (colors == 1).any(), "forced stream must be painted water (slot 1)"
+
+
+def test_ditch_not_forced_at_coarse_resolution():
+    """Artificial drainage (ditch/drain) keeps the sub-cell skip even when forced."""
+    from shapely.geometry import LineString
+
+    n, extent_m = 20, 1000.0
+    mesh = _flat_mesh(n, extent_m)
+    b = _builder(n=n, extent=extent_m, resolution_m=100.0)
+    osm_data = _waterway_osm_data(
+        LineString([(0.0, 0.0), (extent_m, extent_m)]), wtype="ditch"
+    )
+
+    colors = b.colorize_terrain(mesh, osm_data, waterway_min_width_mm=1.0)
+    assert not (colors == 1).any(), "ditches must not be force-painted"
+
+
+def test_forced_width_is_a_minimum():
+    """At fine scales where the real 6 m buffer exceeds the mm width, the forced
+    and unforced results are identical."""
+    from shapely.geometry import LineString
+
+    n, extent_m = 20, 1000.0
+    mesh = _flat_mesh(n, extent_m)
+    osm_data = _waterway_osm_data(LineString([(0.0, 0.0), (extent_m, extent_m)]))
+
+    # 1.0 mm at scale 5000 = 2.5 m half-width < 6.0 m real buffer
+    unforced = _builder(n=n, extent=extent_m).colorize_terrain(mesh, osm_data)
+    forced = _builder(n=n, extent=extent_m).colorize_terrain(
+        mesh, osm_data, waterway_min_width_mm=1.0
+    )
+    assert (unforced == forced).all(), "min semantics: real buffer wins when wider"
+    assert (forced == 1).any(), "river painted in both cases"

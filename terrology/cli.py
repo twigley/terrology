@@ -55,6 +55,8 @@ def run_pipeline(
     dem_source: str = "glo30",
     raceway: bool = False,
     raceway_width: float = 1.5,
+    waterways: bool = False,
+    waterway_width: float = 1.0,
 ) -> Path:
     """Run the terrology pipeline for a single lat/lon point with a radius.
 
@@ -153,7 +155,7 @@ def run_pipeline(
     use_cache = not no_cache
     elev_pad = 0.02
 
-    osm_skip = _skip_osm_layers(resolution_m, no_buildings)
+    osm_skip = _skip_osm_layers(resolution_m, no_buildings, force_waterways=waterways)
     print("Fetching OSM, elevation and Overture data in parallel...")
     with ThreadPoolExecutor(max_workers=3) as executor:
         osm_f = executor.submit(
@@ -245,6 +247,7 @@ def run_pipeline(
         builder.terrain_surface_mesh,
         osm_data,
         contour_interval_m=contour_interval,
+        waterway_min_width_mm=waterway_width if waterways else None,
     )
     terrain_face_colors = _limit_colors(terrain_face_colors, colors)
 
@@ -311,7 +314,9 @@ def run_pipeline(
     return out_dir
 
 
-def _skip_osm_layers(resolution_m: float, no_buildings: bool) -> frozenset[str]:
+def _skip_osm_layers(
+    resolution_m: float, no_buildings: bool, force_waterways: bool = False
+) -> frozenset[str]:
     """OSM layer names safe to omit from the Overpass query at this resolution.
 
     A linear feature is only resolvable when its buffer >= resolution_m / 2.
@@ -333,7 +338,7 @@ def _skip_osm_layers(resolution_m: float, no_buildings: bool) -> frozenset[str]:
                 "circuits",
             }
         )
-    if min_buf > 6.0:  # wide rivers/canals (6 m buffer)
+    if min_buf > 6.0 and not force_waterways:  # wide rivers/canals (6 m buffer)
         skip.add("waterways")
     return frozenset(skip)
 
@@ -398,6 +403,21 @@ def main() -> None:
         default=1.5,
         help="Raceway strip width on the printed model in mm (default: 1.5). "
         "Scale-independent — always this wide regardless of map area.",
+    )
+    parser.add_argument(
+        "--waterways",
+        action="store_true",
+        help="Always include rivers, canals and streams, even on large maps where "
+        "sub-cell waterways are normally skipped, drawn at a guaranteed minimum "
+        "width. Ditches and drains stay scale-gated.",
+    )
+    parser.add_argument(
+        "--waterway-width",
+        type=float,
+        default=1.0,
+        help="Minimum waterway width on the printed model in mm, used with "
+        "--waterways (default: 1.0). Scale-independent minimum — the real river "
+        "width is used where it is larger.",
     )
     parser.add_argument(
         "--buffer",
@@ -683,6 +703,8 @@ def main() -> None:
                 dem_source=args.dem,
                 raceway=args.raceway,
                 raceway_width=args.raceway_width,
+                waterways=args.waterways,
+                waterway_width=args.waterway_width,
             )
             return
         lat2, lon2 = _resolve_location(args.to)
@@ -830,7 +852,9 @@ def main() -> None:
     )
 
     # Fetch elevation, OSM features, and Overture buildings in parallel
-    osm_skip = _skip_osm_layers(resolution_m, no_buildings)
+    osm_skip = _skip_osm_layers(
+        resolution_m, no_buildings, force_waterways=args.waterways
+    )
     elevation = header = None
     if not args.no_terrain:
         from concurrent.futures import ThreadPoolExecutor
@@ -949,6 +973,7 @@ def main() -> None:
             builder.terrain_surface_mesh,
             osm_data,
             contour_interval_m=args.contour_interval,
+            waterway_min_width_mm=args.waterway_width if args.waterways else None,
         )
         terrain_face_colors = _limit_colors(terrain_face_colors, args.colors)
         if args.raceway:

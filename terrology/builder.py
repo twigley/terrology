@@ -836,6 +836,7 @@ class MapBuilder:
         terrain_mesh: trimesh.Trimesh,
         osm_data: dict,
         contour_interval_m: float | None = None,
+        waterway_min_width_mm: float | None = None,
     ) -> np.ndarray:
         """Return per-face colour index: 0=terrain 1=water 2=parks 3=roads 6=railways 7=sand."""
         from shapely import STRtree
@@ -945,6 +946,21 @@ class MapBuilder:
         g = self._gdf_to_utm(osm_data, "waterways")
         if g is not None:
             _WIDE_WATERWAYS = frozenset({"river", "canal", "tidal_channel"})
+            # Artificial drainage stays scale-gated even when waterways are forced —
+            # field drain networks would web an entire rural map in blue.
+            _DRAINAGE_WATERWAYS = frozenset({"ditch", "drain"})
+            # Forced minimum half-width in real metres — guarantees natural
+            # watercourses stay visible at scales where their real buffer is sub-cell.
+            forced_buf = (
+                waterway_min_width_mm / 2.0 * self.scale / 1000.0
+                if waterway_min_width_mm is not None
+                else None
+            )
+            if forced_buf is not None and len(g) > 0:
+                print(
+                    f"  waterways: min width {waterway_min_width_mm:.1f} mm on model  "
+                    f"({forced_buf:.0f} m real-world radius)"
+                )
             wtypes = (
                 g["waterway"].tolist() if "waterway" in g.columns else [""] * len(g)
             )
@@ -952,8 +968,12 @@ class MapBuilder:
                 if geom is None or geom.is_empty:
                     continue
                 if geom.geom_type in ("LineString", "MultiLineString"):
-                    buf = 6.0 if str(wtype) in _WIDE_WATERWAYS else 2.0
-                    if self.resolution_m > 0 and buf < self.resolution_m / 2:
+                    wide = str(wtype) in _WIDE_WATERWAYS
+                    buf = 6.0 if wide else 2.0
+                    forceable = str(wtype) not in _DRAINAGE_WATERWAYS
+                    if forceable and forced_buf is not None:
+                        buf = max(buf, forced_buf)
+                    elif self.resolution_m > 0 and buf < self.resolution_m / 2:
                         continue  # sub-cell waterway line
                     water_geoms.append(geom.buffer(buf))
                 elif geom.geom_type in ("Polygon", "MultiPolygon"):
