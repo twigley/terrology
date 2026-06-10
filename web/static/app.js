@@ -39,6 +39,7 @@ const colorsSelect   = document.getElementById("colors");
 const buildingsBox   = document.getElementById("buildings");
 const roofBox        = document.getElementById("roof-shapes");
 const racewayBox     = document.getElementById("raceway");
+const waterwaysBox   = document.getElementById("waterways");
 const contourInput   = document.getElementById("contour");
 const waterSlider    = document.getElementById("water-depth");
 const waterVal       = document.getElementById("water-val");
@@ -371,6 +372,7 @@ generateBtn.addEventListener("click", async () => {
         no_buildings: !buildingsBox.checked,
         roof_shapes: roofBox.checked,
         raceway: racewayBox.checked,
+        waterways: waterwaysBox.checked,
         contour_interval: contourVal,
         building_exag: bldgExagRaw > 0 ? bldgExagRaw : null,
         water_depth_mm: parseFloat(waterSlider.value),
