@@ -528,6 +528,31 @@ def _drop_tunnels(gdf: gpd.GeoDataFrame) -> gpd.GeoDataFrame:
     return gdf[keep]
 
 
+def _circuit_ways_query(south: float, north: float, west: float, east: float) -> str:
+    """Overpass query for circuit geometry: member ways of motorsport relations,
+    plus standalone ways tagged highway=raceway or sport=motor.
+
+    Standalone ways matter for tracks without a sport=motor / type=circuit
+    relation — e.g. the Nürburgring Nordschleife, whose relation is
+    type=route + route=road but whose segments carry highway=raceway.
+    """
+    bbox = f"({south:.5f},{west:.5f},{north:.5f},{east:.5f})"
+    return f"""
+[out:json][timeout:30];
+(
+  relation["sport"="motor"]{bbox};
+  relation["type"="circuit"]{bbox};
+);
+way(r)->.members;
+(
+  .members;
+  way["highway"="raceway"]{bbox};
+  way["sport"="motor"]{bbox};
+);
+out geom;
+"""
+
+
 def fetch_circuit_ways(
     south: float,
     north: float,
@@ -535,8 +560,9 @@ def fetch_circuit_ways(
     east: float,
     use_cache: bool = True,
 ) -> gpd.GeoDataFrame:
-    """Return a GeoDataFrame of all member ways of motorsport circuit relations
-    within the bbox, in WGS84.
+    """Return a GeoDataFrame of race circuit ways within the bbox, in WGS84:
+    member ways of motorsport circuit relations plus individually tagged
+    raceway ways.
 
     Uses a direct Overpass query to expand relation members — necessary because
     street circuits (e.g. Monaco) use normal highway ways that aren't
@@ -549,15 +575,7 @@ def fetch_circuit_ways(
         if cached is not None:
             return cached
 
-    query = f"""
-[out:json][timeout:30];
-(
-  relation["sport"="motor"]({south:.5f},{west:.5f},{north:.5f},{east:.5f});
-  relation["type"="circuit"]({south:.5f},{west:.5f},{north:.5f},{east:.5f});
-);
-way(r);
-out geom;
-"""
+    query = _circuit_ways_query(south, north, west, east)
     try:
         # Use osmnx's internal Overpass request — same headers, rate limiting,
         # and endpoint as the main OSM fetch, so no separate API abuse.

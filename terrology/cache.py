@@ -112,8 +112,13 @@ def _circuit_ways_path(south: float, north: float, west: float, east: float) -> 
     )
 
 
+# v2: query now also fetches standalone highway=raceway / sport=motor ways,
+# so v1 entries (relation members only) must not be reused.
+_CIRCUIT_WAYS_PKL = "circuit_ways_v2.pkl"
+
+
 def load_circuit_ways(south: float, north: float, west: float, east: float):
-    pkl = _circuit_ways_path(south, north, west, east) / "circuit_ways.pkl"
+    pkl = _circuit_ways_path(south, north, west, east) / _CIRCUIT_WAYS_PKL
     if pkl.exists():
         with open(pkl, "rb") as f:
             return pickle.load(f)
@@ -125,7 +130,7 @@ def save_circuit_ways(
 ) -> None:
     path = _circuit_ways_path(south, north, west, east)
     path.mkdir(parents=True, exist_ok=True)
-    with open(path / "circuit_ways.pkl", "wb") as f:
+    with open(path / _CIRCUIT_WAYS_PKL, "wb") as f:
         pickle.dump(data, f)
 
 

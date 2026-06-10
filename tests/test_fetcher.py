@@ -142,3 +142,50 @@ def test_supplement_preserves_height_column():
     result = supplement_buildings(osm, overture)
     overture_row = result.iloc[-1]
     assert float(overture_row["height"]) == 15.0
+
+
+# ------------------------------------------------------------------ #
+# Circuit ways
+# ------------------------------------------------------------------ #
+
+
+def test_circuit_ways_query_includes_standalone_raceway_ways():
+    """Tracks like the Nordschleife have no sport=motor / type=circuit relation —
+    their segments are individually tagged highway=raceway, so the query must
+    fetch standalone ways too, not only relation members."""
+    from terrology.fetcher import _circuit_ways_query
+
+    q = _circuit_ways_query(50.3, 50.4, 6.9, 7.0)
+    assert 'way["highway"="raceway"]' in q
+    assert 'way["sport"="motor"]' in q
+    assert 'relation["sport"="motor"]' in q
+    assert 'relation["type"="circuit"]' in q
+    # Overpass bbox order is (south, west, north, east)
+    assert "(50.30000,6.90000,50.40000,7.00000)" in q
+
+
+def test_fetch_circuit_ways_parses_way_geometry(monkeypatch):
+    """Way elements with inline geometry become LineStrings in the result GDF."""
+    import terrology.fetcher as fetcher
+
+    response = {
+        "elements": [
+            {
+                "type": "way",
+                "id": 799394524,
+                "geometry": [
+                    {"lat": 50.34, "lon": 6.96},
+                    {"lat": 50.35, "lon": 6.97},
+                    {"lat": 50.36, "lon": 6.98},
+                ],
+            },
+            {"type": "relation", "id": 38566},
+        ]
+    }
+    monkeypatch.setattr(
+        fetcher.ox._overpass, "_overpass_request", lambda data: response
+    )
+    gdf = fetcher.fetch_circuit_ways(50.3, 50.4, 6.9, 7.0, use_cache=False)
+    assert len(gdf) == 1
+    assert gdf.geometry.iloc[0].geom_type == "LineString"
+    assert gdf.crs.to_epsg() == 4326
