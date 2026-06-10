@@ -1802,12 +1802,16 @@ web = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "fastapi" },
     { name = "httpx" },
     { name = "mypy" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
+    { name = "python-multipart" },
     { name = "ruff" },
+    { name = "slowapi" },
     { name = "types-requests" },
+    { name = "uvicorn", extra = ["standard"] },
 ]
 web = [
     { name = "fastapi" },
@@ -1843,12 +1847,16 @@ provides-extras = ["web"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "fastapi", specifier = ">=0.115" },
     { name = "httpx", specifier = ">=0.27" },
     { name = "mypy", specifier = ">=1.14" },
     { name = "pytest", specifier = ">=8" },
     { name = "pytest-asyncio", specifier = ">=0.24" },
+    { name = "python-multipart", specifier = ">=0.0.20" },
     { name = "ruff", specifier = ">=0.9" },
+    { name = "slowapi", specifier = ">=0.1.9" },
     { name = "types-requests", specifier = ">=2" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.34" },
 ]
 web = [
     { name = "fastapi", specifier = ">=0.115" },

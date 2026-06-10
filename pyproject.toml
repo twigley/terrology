@@ -42,6 +42,9 @@ build-backend = "hatchling.build"
 packages = ["terrology", "web"]
 
 [dependency-groups]
+# Mirrors [project.optional-dependencies].web — extras and PEP 735 groups can't
+# reference each other, so keep the two lists in sync. The dev group includes
+# this so a fresh `uv sync` can collect and run tests/test_web.py.
 web = [
     "fastapi>=0.115",
     "python-multipart>=0.0.20",
@@ -55,6 +58,7 @@ dev = [
     "mypy>=1.14",
     "types-requests>=2",
     "httpx>=0.27",
+    { include-group = "web" },
 ]
 
 [tool.ruff]
