@@ -75,6 +75,23 @@ class JobStore:
         with self._lock:
             return sum(1 for j in self._jobs.values() if j.status == JobStatus.RUNNING)
 
+    def try_create(self, job_id: str, max_active: int) -> Job | None:
+        """
+        Atomically check active (QUEUED + RUNNING) job count and create if below limit.
+        Returns the created Job if successful, None if at or above max_active.
+        """
+        with self._lock:
+            active_count = sum(
+                1
+                for j in self._jobs.values()
+                if j.status in (JobStatus.QUEUED, JobStatus.RUNNING)
+            )
+            if active_count >= max_active:
+                return None
+            job = Job(id=job_id)
+            self._jobs[job_id] = job
+            return job
+
     def cleanup_expired(self) -> None:
         now = _now()
         with self._lock:

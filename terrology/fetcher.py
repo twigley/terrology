@@ -604,6 +604,8 @@ def fetch_circuit_ways(
 
 
 def _parse_aaigrid(text: str) -> tuple[np.ndarray, dict]:
+    import io
+
     lines = text.strip().splitlines()
     header: dict[str, float] = {}
     header_keys = {
@@ -627,7 +629,7 @@ def _parse_aaigrid(text: str) -> tuple[np.ndarray, dict]:
 
     ncols = int(header["ncols"])
     nrows = int(header["nrows"])
-    flat = np.fromstring(" ".join(lines[i:]), dtype=np.float32, sep=" ")
+    flat = np.loadtxt(io.StringIO(" ".join(lines[i:])), dtype=np.float32)
     arr = flat.reshape(nrows, ncols)
     nodata = header.get("nodata_value", -9999.0)
     arr[arr == nodata] = np.nan

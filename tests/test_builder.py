@@ -551,3 +551,214 @@ def test_build_sea_polygon_uses_direction_not_elevation():
     assert centroid.y > 5_000, (
         f"sea polygon centroid should be north, got y={centroid.y:.0f}"
     )
+
+
+# ------------------------------------------------------------------ #
+# _paint_tree majority voting — regression tests for bug fix
+# ------------------------------------------------------------------ #
+
+
+def _make_builder_for_paint(x_max=200.0, y_max=200.0):
+    """Return a MapBuilder where UTM metres == model mm (scale=1000)."""
+    return MapBuilder(
+        lat=51.5,
+        lon=-0.12,
+        x_min=0.0,
+        x_max=x_max,
+        y_min=0.0,
+        y_max=y_max,
+        scale=1000,
+        terrain_exag=1.0,
+        grid_size=4,
+    )
+
+
+def _single_face_mesh(v0, v1, v2, z=1.0):
+    """Return a trimesh.Trimesh with a single upward-facing triangle."""
+    import trimesh as _trimesh
+
+    verts = np.array(
+        [
+            [v0[0], v0[1], z],
+            [v1[0], v1[1], z],
+            [v2[0], v2[1], z],
+        ],
+        dtype=float,
+    )
+    faces = np.array([[0, 1, 2]])
+    mesh = _trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+    # Force upward normal
+    _trimesh.repair.fix_normals(mesh)
+    return mesh
+
+
+def test_paint_tree_single_vertex_does_not_paint():
+    """A polygon covering only one vertex (1/7 sample points) must NOT paint the face.
+
+    Regression for the >=1 threshold bug: the correct majority threshold is >=4.
+    """
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+
+    builder = _make_builder_for_paint()
+    builder._sea_poly = None
+    # Set min_elev > 1.5 so the elevation-based sea supplement never fires
+    builder._min_elev = 10.0
+    builder._terrain_interp = None
+
+    # Triangle with vertices at (0,0), (100,0), (0,100) — model mm == UTM m.
+    # The 7 sample points are:
+    #   centroid=(33.3,33.3), v0=(0,0), v1=(100,0), v2=(0,100),
+    #   mid01=(50,0), mid12=(50,50), mid20=(0,50)
+    mesh = _single_face_mesh((0, 0), (100, 0), (0, 100))
+
+    # Park polygon covering only vertex (0,0) — a tiny 1×1 square → 1/7 vote
+    tiny_poly = Polygon([(-1, -1), (1, -1), (1, 1), (-1, 1)])
+    park_gdf = gpd.GeoDataFrame(geometry=[tiny_poly], crs="EPSG:32630")
+    osm_data = {"parks": park_gdf}
+
+    colors = builder.colorize_terrain(mesh, osm_data)
+
+    # Face must NOT be painted parks (2) — only 1 of 7 sample points falls inside
+    assert colors[0] != 2, (
+        "face with only 1/7 sample points inside polygon must not be painted"
+    )
+
+
+def test_paint_tree_majority_paints_face():
+    """A polygon covering >= 4 of 7 sample points must paint the face."""
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+
+    builder = _make_builder_for_paint()
+    builder._sea_poly = None
+    # Set min_elev > 1.5 so the elevation-based sea supplement never fires
+    builder._min_elev = 10.0
+    builder._terrain_interp = None
+
+    # Triangle with vertices at (0,0), (100,0), (0,100) — model mm == UTM m.
+    # The 7 sample points are:
+    #   centroid=(33.3,33.3), v0=(0,0), v1=(100,0), v2=(0,100),
+    #   mid01=(50,0), mid12=(50,50), mid20=(0,50)
+    mesh = _single_face_mesh((0, 0), (100, 0), (0, 100))
+
+    # Park polygon = the whole triangle — covers all 7 sample points → 7 votes ≥ 4
+    full_poly = Polygon([(-1, -1), (110, -1), (-1, 110)])
+    park_gdf = gpd.GeoDataFrame(geometry=[full_poly], crs="EPSG:32630")
+    osm_data = {"parks": park_gdf}
+
+    colors = builder.colorize_terrain(mesh, osm_data)
+
+    assert colors[0] == 2, (
+        "face with all 7 sample points inside polygon must be painted parks"
+    )
+
+
+# ------------------------------------------------------------------ #
+# _clip_mesh_to_polygon — MultiPolygon both parts produce terrain
+# ------------------------------------------------------------------ #
+
+
+def test_clip_mesh_to_multipolygon_both_parts_survive():
+    """Clipping a mesh to a two-part MultiPolygon must preserve geometry from both parts.
+
+    Regression for the bug where only the largest polygon part was used, silently
+    dropping terrain for smaller parts (e.g. islands).
+    """
+    from shapely.geometry import MultiPolygon, Polygon
+
+    from terrology.builder import _clip_mesh_to_polygon
+
+    # Build a flat 200×200 mm heightfield covering x:[0,200], y:[0,200], z:[0,2]
+    x, y = np.meshgrid(np.linspace(0, 200, 10), np.linspace(0, 200, 10))
+    z = np.ones_like(x) * 2.0
+    mesh = _heightfield_solid(x, y, z)
+
+    # Two disjoint parts: left strip [0,80] and right strip [120,200]
+    left = Polygon([(0, 0), (80, 0), (80, 200), (0, 200)])
+    right = Polygon([(120, 0), (200, 0), (200, 200), (120, 200)])
+    clip = MultiPolygon([left, right])
+
+    result = _clip_mesh_to_polygon(mesh, clip)
+
+    # The result must contain geometry on both sides of the gap [80,120]
+    verts = result.vertices
+    x_coords = verts[:, 0]
+    has_left = np.any(x_coords < 80)
+    has_right = np.any(x_coords > 120)
+    assert has_left, "clipped mesh must contain geometry from the left polygon part"
+    assert has_right, "clipped mesh must contain geometry from the right polygon part"
+
+
+# ------------------------------------------------------------------ #
+# _preproject_depression_layers — thread-safety pre-projection
+# ------------------------------------------------------------------ #
+
+
+def test_preproject_depression_layers_populates_all_keys():
+    """_preproject_depression_layers must populate all layers _apply_depressions needs."""
+    builder = MapBuilder(
+        lat=51.5,
+        lon=-0.12,
+        x_min=0,
+        x_max=1000,
+        y_min=0,
+        y_max=1000,
+        scale=5000,
+        terrain_exag=1.0,
+        grid_size=4,
+    )
+    # Empty osm_data — all layers are absent; _preproject must still create all keys
+    osm_data: dict = {}
+    builder._preproject_depression_layers(osm_data)
+
+    assert builder._depression_gdfs is not None
+    for key in ("roads", "railways", "waterways", "water_area", "water_landuse"):
+        assert key in builder._depression_gdfs, f"missing key: {key}"
+
+
+def test_apply_depressions_uses_preprojected_when_set():
+    """_apply_depressions must use _depression_gdfs when set, not call _gdf_to_utm."""
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+
+    x_min, x_max, y_min, y_max = 0.0, 10_000.0, 0.0, 10_000.0
+    lake = Polygon([(4000, 4000), (6000, 4000), (6000, 6000), (4000, 6000)])
+    water_gdf = gpd.GeoDataFrame(geometry=[lake], crs="EPSG:32630")
+
+    builder = MapBuilder(
+        lat=51.5,
+        lon=-0.12,
+        x_min=x_min,
+        x_max=x_max,
+        y_min=y_min,
+        y_max=y_max,
+        scale=10_000,
+        terrain_exag=2.0,
+        grid_size=4,
+        water_depth_mm=1.0,
+    )
+    builder._sea_poly = None
+    builder._min_elev = 0.0
+
+    # Set _depression_gdfs directly (simulates what _preproject_depression_layers does)
+    builder._depression_gdfs = {
+        "roads": None,
+        "railways": None,
+        "waterways": None,
+        "water_area": water_gdf,
+        "water_landuse": None,
+    }
+
+    gx1 = np.linspace(x_min, x_max, 20)
+    gy1 = np.linspace(y_min, y_max, 20)
+    gx, gy = np.meshgrid(gx1, gy1)
+    elev = np.zeros_like(gx)
+
+    # Pass empty osm_data — if _apply_depressions still calls _gdf_to_utm it would
+    # miss the lake.  But since _depression_gdfs is set, it should use it directly.
+    builder._apply_depressions(elev, {}, gx, gy, [])
+
+    assert float(elev.min()) < 0, (
+        "_apply_depressions must use pre-projected water_area from _depression_gdfs"
+    )

@@ -232,6 +232,8 @@ def _3mf_objects(
 def _build_3mf_model(
     objects: "list[tuple[str, trimesh.Trimesh, int]]",
 ) -> str:
+    import io
+
     out: list[str] = [
         '<?xml version="1.0" encoding="UTF-8"?>\n',
         '<model unit="millimeter" xml:lang="en-US"\n',
@@ -256,15 +258,25 @@ def _build_3mf_model(
             f'  <object id="{obj_id}" name="{name}" type="model" pid="1" p1="{cidx}">\n'
         )
         out.append("   <mesh>\n    <vertices>\n")
-        out.extend(
-            f'     <vertex x="{x:.4f}" y="{y:.4f}" z="{z:.4f}"/>\n'
-            for x, y, z in mesh.vertices
+        # Use numpy.savetxt with a StringIO buffer to build vertex lines efficiently
+        verts_buf = io.StringIO()
+        np.savetxt(
+            verts_buf, mesh.vertices, fmt='     <vertex x="%.4f" y="%.4f" z="%.4f"/>'
         )
+        verts_lines = verts_buf.getvalue().rstrip()
+        if verts_lines:
+            out.append(verts_lines)
+            out.append("\n")
         out.append("    </vertices>\n    <triangles>\n")
-        out.extend(
-            f'     <triangle v1="{v1}" v2="{v2}" v3="{v3}"/>\n'
-            for v1, v2, v3 in mesh.faces
+        # Use numpy.savetxt with a StringIO buffer to build triangle lines efficiently
+        faces_buf = io.StringIO()
+        np.savetxt(
+            faces_buf, mesh.faces, fmt='     <triangle v1="%d" v2="%d" v3="%d"/>'
         )
+        faces_lines = faces_buf.getvalue().rstrip()
+        if faces_lines:
+            out.append(faces_lines)
+            out.append("\n")
         out.append("    </triangles>\n   </mesh>\n  </object>\n")
         obj_id += 1
 

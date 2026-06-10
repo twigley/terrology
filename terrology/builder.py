@@ -60,15 +60,46 @@ def _clip_mesh_to_polygon(mesh, clip_poly_mm):
     Boolean-intersect a trimesh solid with a prism whose cross-section is
     clip_poly_mm (model mm XY coordinates). Returns the clipped mesh.
     Requires manifold3d (used automatically by trimesh 4.x).
-    """
-    # extrude_polygon requires a single Polygon — take the largest part of a MultiPolygon.
-    if clip_poly_mm.geom_type == "MultiPolygon":
-        clip_poly_mm = max(clip_poly_mm.geoms, key=lambda p: p.area)
 
+    MultiPolygon clip areas (e.g. archipelagos, disjoint area selections) are
+    handled by building a prism for each part and unioning them before the
+    boolean intersection, so every part of the area produces terrain.
+    """
     z_lo, z_hi = float(mesh.bounds[0][2]), float(mesh.bounds[1][2])
     height = (z_hi - z_lo) + 20.0  # 10 mm margin each side
-    prism = trimesh.creation.extrude_polygon(clip_poly_mm, height=height)
-    prism.apply_translation([0.0, 0.0, z_lo - 10.0])
+
+    if clip_poly_mm.geom_type == "MultiPolygon":
+        parts = list(clip_poly_mm.geoms)
+        prisms = []
+        for part in parts:
+            p = trimesh.creation.extrude_polygon(part, height=height)
+            p.apply_translation([0.0, 0.0, z_lo - 10.0])
+            prisms.append(p)
+        if len(prisms) == 1:
+            prism = prisms[0]
+        else:
+            prism = trimesh.boolean.union(prisms, engine="manifold", check_volume=False)
+            if prism is None or len(prism.faces) == 0:
+                # Union failed — fall back to clipping against each part separately
+                # and concatenating results.
+                parts_results = []
+                for p in prisms:
+                    r = trimesh.boolean.intersection(
+                        [mesh, p], engine="manifold", check_volume=False
+                    )
+                    if r is not None and len(r.faces) > 0:
+                        parts_results.append(r)
+                if not parts_results:
+                    return mesh
+                return (
+                    trimesh.util.concatenate(parts_results)
+                    if len(parts_results) > 1
+                    else parts_results[0]
+                )
+    else:
+        prism = trimesh.creation.extrude_polygon(clip_poly_mm, height=height)
+        prism.apply_translation([0.0, 0.0, z_lo - 10.0])
+
     result = trimesh.boolean.intersection(
         [mesh, prism], engine="manifold", check_volume=False
     )
@@ -143,6 +174,9 @@ class MapBuilder:
         self._sea_poly = (
             None  # built once from OSM coastline; None = fall back to elev-based
         )
+        # Pre-projected GDFs for _apply_depressions (populated before parallel
+        # threads to avoid concurrent _gdf_to_utm calls on the same GeoDataFrame).
+        self._depression_gdfs: dict | None = None
 
         self.terrain_mesh: trimesh.Trimesh | None = None
         self.terrain_base_mesh: trimesh.Trimesh | None = None
@@ -281,6 +315,11 @@ class MapBuilder:
         elev_f = self._terrain_interp(
             np.column_stack([gy_f.ravel(), gx_f.ravel()])
         ).reshape(fine, fine)
+
+        # Pre-project all GDFs used by _apply_depressions once, before the
+        # parallel threads start.  _gdf_to_utm must not be called concurrently
+        # on the same GeoDataFrame (same pattern as _build_elevated_geoms).
+        self._preproject_depression_layers(osm_data)
 
         elev_mod = elev.copy()
         elev_f_mod = elev_f.copy()
@@ -525,6 +564,18 @@ class MapBuilder:
                     geoms.append(geom)
         return geoms
 
+    def _preproject_depression_layers(self, osm_data: dict) -> None:
+        """Pre-project all GeoDataFrame layers consumed by _apply_depressions.
+
+        Called once before the parallel depression threads so _gdf_to_utm is
+        never invoked concurrently on the same GeoDataFrame.  Results are
+        cached in self._depression_gdfs and consumed by _apply_depressions.
+        """
+        layer_names = ("roads", "railways", "waterways", "water_area", "water_landuse")
+        self._depression_gdfs = {
+            name: self._gdf_to_utm(osm_data, name) for name in layer_names
+        }
+
     def _apply_depressions(
         self,
         elev: np.ndarray,
@@ -552,10 +603,16 @@ class MapBuilder:
             max(self.x_max - self.x_min, self.y_max - self.y_min) / self.grid_size
         )
 
+        def _get_layer(name: str):
+            """Return pre-projected GDF if available, else project on demand."""
+            if self._depression_gdfs is not None:
+                return self._depression_gdfs.get(name)
+            return self._gdf_to_utm(osm_data, name)
+
         # Roads/railways — buffer is 4 m; skip when sub-cell (no grid point can fall inside).
         if 4.0 >= base_cell_m / 2:
             for layer_name, line_buf in [("roads", 4.0), ("railways", 4.0)]:
-                gdf_utm = self._gdf_to_utm(osm_data, layer_name)
+                gdf_utm = _get_layer(layer_name)
                 if gdf_utm is None:
                     continue
                 if "bridge" in gdf_utm.columns:
@@ -590,7 +647,7 @@ class MapBuilder:
             ("water_area", 0.0),
             ("water_landuse", 0.0),
         ]:
-            gdf_utm = self._gdf_to_utm(osm_data, layer_name)
+            gdf_utm = _get_layer(layer_name)
             if gdf_utm is None:
                 continue
             if layer_name == "water_area" and "natural" in gdf_utm.columns:
@@ -871,8 +928,14 @@ class MapBuilder:
         cy_utm = sample_utm_y[::7]
         pts = shapely.points(cx_utm, cy_utm)
 
-        def _paint_tree(geoms: list, cidx: int) -> None:
-            """Paint faces where a majority (>=4/7) of sample points fall inside any geometry."""
+        def _paint_tree(geoms: list, cidx: int, min_votes: int = 4) -> None:
+            """Paint faces where >= min_votes of the 7 sample points fall inside any geometry.
+
+            Default 4/7 (majority) keeps area-feature boundaries aligned to the polygon
+            without bleeding into adjacent faces.  Thin line-derived buffers (roads,
+            railways, waterways) can be narrower than a face and would never win a
+            majority — pass min_votes=1 so any face the strip crosses is painted.
+            """
             valid = [
                 g
                 for g in geoms
@@ -885,8 +948,12 @@ class MapBuilder:
             pt_idx, _ = STRtree(valid).query(pts_multi, predicate="within")
             if not len(pt_idx):
                 return
+            # Deduplicate point indices before counting: overlapping geometries
+            # in the tree can return the same point multiple times (once per
+            # containing geometry), which would double-count votes for that point.
+            pt_idx = np.unique(pt_idx)
             votes = np.bincount(pt_idx // 7, minlength=n_top)
-            painted = np.where(votes >= 1)[0]
+            painted = np.where(votes >= min_votes)[0]
             if len(painted):
                 color_idx[top_indices[painted]] = cidx
 
@@ -938,8 +1005,11 @@ class MapBuilder:
                 park_geoms.extend(g.geometry)
         _paint_tree(park_geoms, 2)
 
-        # 2. Explicit water features
+        # 2. Explicit water features.  Line waterways are buffered into thin strips
+        # that may be narrower than a colour-grid face (especially when forced via
+        # --waterways), so they are painted separately with min_votes=1.
         water_geoms: list = []
+        waterway_line_geoms: list = []
         g = self._gdf_to_utm(osm_data, "water_area")
         if g is not None:
             water_geoms.extend(g.geometry)
@@ -975,19 +1045,21 @@ class MapBuilder:
                         buf = max(buf, forced_buf)
                     elif self.resolution_m > 0 and buf < self.resolution_m / 2:
                         continue  # sub-cell waterway line
-                    water_geoms.append(geom.buffer(buf))
+                    waterway_line_geoms.append(geom.buffer(buf))
                 elif geom.geom_type in ("Polygon", "MultiPolygon"):
                     water_geoms.append(geom)
         g = self._gdf_to_utm(osm_data, "water_landuse")
         if g is not None:
             water_geoms.extend(g.geometry)
         _paint_tree(water_geoms, 1)
+        _paint_tree(waterway_line_geoms, 1, min_votes=1)
 
         # 3. Roads — vectorised buffer then bulk STRtree query
         # Line roads are only resolvable when their buffer >= half a colour cell.
         # Polygon roads (pedestrian areas etc.) are always kept — they're area features.
         min_road_buf = self.resolution_m / 2 if self.resolution_m > 0 else 0.0
         road_geoms: list = []
+        road_line_geoms: list = []
         g = self._gdf_to_utm(osm_data, "roads")
         if g is not None:
             geom_arr = g.geometry.values
@@ -1019,7 +1091,9 @@ class MapBuilder:
                 ]
             )
             if line_mask.any():
-                road_geoms.extend(shapely.buffer(geom_arr[line_mask], dists[line_mask]))
+                road_line_geoms.extend(
+                    shapely.buffer(geom_arr[line_mask], dists[line_mask])
+                )
             if poly_mask.any():
                 road_geoms.extend(geom_arr[poly_mask])
         # Railways — own colour slot (collapsed to roads by _limit_colors when n<6)
@@ -1034,7 +1108,7 @@ class MapBuilder:
                     and not geom.is_empty
                     and geom.geom_type in ("LineString", "MultiLineString")
                 ]
-                _paint_tree(rail_geoms, 6)
+                _paint_tree(rail_geoms, 6, min_votes=1)
 
         # Paved polygon areas share the roads colour slot
         for src in ("pedestrian_areas", "parking"):
@@ -1057,9 +1131,10 @@ class MapBuilder:
                 if geom.geom_type in ("Polygon", "MultiPolygon"):
                     road_geoms.append(geom)
                 elif geom.geom_type in ("LineString", "MultiLineString"):
-                    road_geoms.append(geom.buffer(15.0))
+                    road_line_geoms.append(geom.buffer(15.0))
 
         _paint_tree(road_geoms, 3)
+        _paint_tree(road_line_geoms, 3, min_votes=1)
 
         # Bridges and elevated structures must never end up water-coloured: the 2D
         # polygon containment tests above can't see elevation, so a bridge over a bay

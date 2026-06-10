@@ -22,10 +22,27 @@ from web.jobs import JobStatus, store
 _STATIC = Path(__file__).parent / "static"
 
 
+def _rate_limit_key(request: Request) -> str:
+    """
+    Rate limiting key: IP address for per-user quotas.
+    Honours X-Forwarded-For when TERROLOGY_TRUST_PROXY=1 (for reverse proxies).
+    By default, trusts only direct peer IP to prevent spoofing.
+    """
+    if os.getenv("TERROLOGY_TRUST_PROXY") == "1":
+        xff = request.headers.get("X-Forwarded-For")
+        if xff:
+            # X-Forwarded-For may be a comma-separated list; take the first (originating client)
+            return xff.split(",")[0].strip()
+    return get_remote_address(request)
+
+
 async def _cleanup_loop() -> None:
     while True:
         await asyncio.sleep(300)  # every 5 minutes
-        store.cleanup_expired()
+        try:
+            store.cleanup_expired()
+        except Exception as e:
+            print(f"Error in cleanup loop: {e}")
 
 
 @asynccontextmanager
@@ -38,7 +55,7 @@ async def lifespan(app: FastAPI):
 _RATE_LIMIT = "5/hour" if not os.getenv("TERROLOGY_NO_RATE_LIMIT") else "10000/hour"
 _MAX_JOBS = int(os.getenv("MAX_CONCURRENT_JOBS", "1"))
 
-limiter = Limiter(key_func=get_remote_address)
+limiter = Limiter(key_func=_rate_limit_key)
 app = FastAPI(title="Terrology", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
@@ -104,10 +121,10 @@ async def create_job(
     params: JobParams,
     background_tasks: BackgroundTasks,
 ):
-    if store.running_count() >= _MAX_JOBS:
-        raise HTTPException(status_code=503, detail="Server busy – try again shortly")
     job_id = str(uuid.uuid4())
-    store.create(job_id)
+    job = store.try_create(job_id, _MAX_JOBS)
+    if job is None:
+        raise HTTPException(status_code=503, detail="Server busy – try again shortly")
     background_tasks.add_task(run_job, job_id, params.model_dump())
     return {"job_id": job_id}
 

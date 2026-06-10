@@ -34,12 +34,15 @@ def run_pipeline(
     lon: float,
     radius: float = 500,
     clip_polygon_wgs84=None,
+    clip_polygon_utm=None,
+    bbox_utm: "tuple[float, float, float, float] | None" = None,
     scale: float | None = None,
     size: float = 190.0,
     terrain_exag: float = 2.0,
     building_exag: float | None = None,
     colors: int = 4,
     no_buildings: bool = False,
+    no_terrain: bool = False,
     roof_shapes: bool = False,
     contour_interval: float | None = None,
     grid_size: int = 200,
@@ -57,8 +60,46 @@ def run_pipeline(
     raceway_width: float = 1.5,
     waterways: bool = False,
     waterway_width: float = 1.0,
+    route_points_utm: "list[tuple[float, float]] | None" = None,
+    route_width: float = 1.5,
+    _mode_banner: "str | None" = None,
+    _nozzle_cap_message: "str | None" = None,
 ) -> Path:
     """Run the terrology pipeline for a single lat/lon point with a radius.
+
+    Extra keyword parameters (all optional, all have safe defaults):
+
+    ``clip_polygon_utm``
+        A pre-projected UTM shapely Polygon that overrides ``clip_polygon_wgs84``
+        when the caller has already done the projection (e.g. after computing an
+        area or shape clip in UTM space).  The WGS84 variant is still accepted for
+        the common single-point / web-app call path.
+
+    ``bbox_utm``
+        ``(x_min, x_max, y_min, y_max)`` in UTM metres.  When given, skips the
+        internal radius-based bbox derivation and uses these extents directly.
+        Required when the caller builds the bbox from two points or a GPX track
+        rather than a single centre point.
+
+    ``no_terrain``
+        Skip terrain build/export — used when only buildings + features are needed.
+
+    ``route_points_utm``
+        List of ``(x, y)`` UTM coordinate pairs representing a GPX track.  When
+        provided, the route is painted onto the colour surface as a red overlay.
+
+    ``route_width``
+        Width of the painted route line on the printed model in mm (default 1.5).
+
+    ``_mode_banner``
+        Optional pre-formatted string printed instead of the default
+        ``Location / Radius / Scale`` header.  Callers that already know the
+        human-readable span description pass it here (area, route, two-point
+        modes).
+
+    ``_nozzle_cap_message``
+        Optional pre-formatted string printed when the caller has already applied
+        a nozzle cap to grid sizes and wants the cap reported in the banner.
 
     Returns the output directory path.
     Raises ValueError for bad parameters, RuntimeError for fetch/build failures.
@@ -90,16 +131,30 @@ def run_pipeline(
 
     cx, cy = to_utm.transform(lon, lat)
 
-    if clip_polygon_wgs84 is not None:
+    # Resolve the clip polygon in UTM space.  Three sources in priority order:
+    #   1. clip_polygon_utm — already projected (area / shape-clip paths)
+    #   2. clip_polygon_wgs84 — reproject here (web app / single-point path)
+    #   3. None — no clip
+    if clip_polygon_utm is not None:
+        area_poly_utm = clip_polygon_utm
+    elif clip_polygon_wgs84 is not None:
         from shapely.ops import transform as _shp_transform
 
         area_poly_utm = _shp_transform(
             lambda x, y: to_utm.transform(x, y), clip_polygon_wgs84
         )
+    else:
+        area_poly_utm = None
+
+    # Resolve the UTM bounding box.  When bbox_utm is given the caller has
+    # already computed it (two-point / GPX / area paths); otherwise derive
+    # it from the clip polygon or from the radius around the centre point.
+    if bbox_utm is not None:
+        x_min, x_max, y_min, y_max = bbox_utm
+    elif area_poly_utm is not None:
         ab = area_poly_utm.bounds
         x_min, y_min, x_max, y_max = ab[0], ab[1], ab[2], ab[3]
     else:
-        area_poly_utm = None
         x_min, x_max = cx - radius, cx + radius
         y_min, y_max = cy - radius, cy + radius
 
@@ -140,8 +195,14 @@ def run_pipeline(
     else:
         _auto_skip_bldg = None
 
-    print(f"\nLocation  : {lat:.5f}, {lon:.5f}")
-    print(f"Radius    : {radius} m   |   Scale: 1:{actual_scale:.0f}")
+    if _nozzle_cap_message:
+        print(_nozzle_cap_message)
+
+    if _mode_banner:
+        print(_mode_banner)
+    else:
+        print(f"\nLocation  : {lat:.5f}, {lon:.5f}")
+        print(f"Radius    : {radius} m   |   Scale: 1:{actual_scale:.0f}")
     print(f"Model size: {model_x_mm:.1f} x {model_y_mm:.1f} mm")
     _skipped = _skipped_features(resolution_m)
     if _skipped:
@@ -156,44 +217,80 @@ def run_pipeline(
     elev_pad = 0.02
 
     osm_skip = _skip_osm_layers(resolution_m, no_buildings, force_waterways=waterways)
-    print("Fetching OSM, elevation and Overture data in parallel...")
-    with ThreadPoolExecutor(max_workers=3) as executor:
-        osm_f = executor.submit(
-            fetch_osm_data,
-            south=osm_south,
-            north=osm_north,
-            west=osm_west,
-            east=osm_east,
-            use_cache=use_cache,
-            skip_layers=osm_skip,
-        )
-        elev_f = executor.submit(
-            fetch_elevation,
-            south=osm_south - elev_pad,
-            north=osm_north + elev_pad,
-            west=osm_west - elev_pad,
-            east=osm_east + elev_pad,
-            use_cache=use_cache,
-            dem_source=dem_source,
-        )
-        ov_f = (
-            executor.submit(
-                fetch_overture_buildings,
-                osm_south,
-                osm_north,
-                osm_west,
-                osm_east,
-                use_cache,
+    elevation = header = None
+    if not no_terrain:
+        print("Fetching OSM, elevation and Overture data in parallel...")
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            osm_f = executor.submit(
+                fetch_osm_data,
+                south=osm_south,
+                north=osm_north,
+                west=osm_west,
+                east=osm_east,
+                use_cache=use_cache,
+                skip_layers=osm_skip,
             )
-            if not no_buildings
-            else None
+            elev_f = executor.submit(
+                fetch_elevation,
+                south=osm_south - elev_pad,
+                north=osm_north + elev_pad,
+                west=osm_west - elev_pad,
+                east=osm_east + elev_pad,
+                use_cache=use_cache,
+                dem_source=dem_source,
+            )
+            ov_f = (
+                executor.submit(
+                    fetch_overture_buildings,
+                    osm_south,
+                    osm_north,
+                    osm_west,
+                    osm_east,
+                    use_cache,
+                )
+                if not no_buildings
+                else None
+            )
+            osm_data = osm_f.result()
+            elevation, header = elev_f.result()
+        print(
+            f"  Elevation: {elevation.shape[1]} x {elevation.shape[0]} cells  "
+            f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
         )
-        osm_data = osm_f.result()
-        elevation, header = elev_f.result()
-    print(
-        f"  Elevation: {elevation.shape[1]} x {elevation.shape[0]} cells  "
-        f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
-    )
+    else:
+        _need_ov = not no_buildings
+        if _need_ov:
+            print("Fetching OSM and Overture data in parallel...")
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                osm_f = executor.submit(
+                    fetch_osm_data,
+                    south=osm_south,
+                    north=osm_north,
+                    west=osm_west,
+                    east=osm_east,
+                    use_cache=use_cache,
+                    skip_layers=osm_skip,
+                )
+                ov_f = executor.submit(
+                    fetch_overture_buildings,
+                    osm_south,
+                    osm_north,
+                    osm_west,
+                    osm_east,
+                    use_cache,
+                )
+                osm_data = osm_f.result()
+        else:
+            print("Fetching OSM data...")
+            osm_data = fetch_osm_data(
+                south=osm_south,
+                north=osm_north,
+                west=osm_west,
+                east=osm_east,
+                use_cache=use_cache,
+                skip_layers=osm_skip,
+            )
+            ov_f = None
 
     if raceway:
         print("  Fetching circuit relation member ways...")
@@ -225,11 +322,16 @@ def run_pipeline(
         resolution_m=resolution_m,
     )
 
-    print(f"\nBuilding terrain mesh ({actual_grid}x{actual_grid})...")
-    terrain_mesh = builder.build_terrain(elevation, header, osm_data)
-    if not skip_stls:
-        export_stl(terrain_mesh, out_dir / "terrain.stl")
+    # --- Terrain ---
+    terrain_mesh = None
+    if not no_terrain:
+        assert elevation is not None and header is not None
+        print(f"\nBuilding terrain mesh ({actual_grid}x{actual_grid})...")
+        terrain_mesh = builder.build_terrain(elevation, header, osm_data)
+        if not skip_stls:
+            export_stl(terrain_mesh, out_dir / "terrain.stl")
 
+    # --- Buildings ---
     if not no_buildings:
         osm_data["buildings"] = supplement_buildings(
             osm_data.get("buildings"), ov_f.result()
@@ -242,25 +344,39 @@ def run_pipeline(
         if buildings_mesh is not None and not skip_stls:
             export_stl(buildings_mesh, out_dir / "buildings.stl")
 
-    print("\nColouring terrain faces...")
-    terrain_face_colors = builder.colorize_terrain(
-        builder.terrain_surface_mesh,
-        osm_data,
-        contour_interval_m=contour_interval,
-        waterway_min_width_mm=waterway_width if waterways else None,
-    )
-    terrain_face_colors = _limit_colors(terrain_face_colors, colors)
-
-    if raceway:
-        print("\nHighlighting raceway...")
-        terrain_face_colors = builder.colorize_raceway(
+    # --- Colour terrain surface ---
+    terrain_face_colors = None
+    if terrain_mesh is not None:
+        assert builder.terrain_surface_mesh is not None
+        print("\nColouring terrain faces...")
+        terrain_face_colors = builder.colorize_terrain(
             builder.terrain_surface_mesh,
             osm_data,
-            width_mm=raceway_width,
-            base_colors=terrain_face_colors,
+            contour_interval_m=contour_interval,
+            waterway_min_width_mm=waterway_width if waterways else None,
         )
+        terrain_face_colors = _limit_colors(terrain_face_colors, colors)
 
-    if not skip_stls:
+        if raceway:
+            print("\nHighlighting raceway...")
+            terrain_face_colors = builder.colorize_raceway(
+                builder.terrain_surface_mesh,
+                osm_data,
+                width_mm=raceway_width,
+                base_colors=terrain_face_colors,
+            )
+
+        if route_points_utm is not None:
+            print("\nPainting route on terrain faces...")
+            terrain_face_colors = builder.colorize_route(
+                builder.terrain_surface_mesh,
+                route_points_utm,
+                width_mm=route_width,
+                base_colors=terrain_face_colors,
+            )
+
+    # --- Per-colour STLs (for slicers that can't use MTL) ---
+    if terrain_face_colors is not None and not skip_stls:
         print("\nExporting per-colour STLs...")
         export_color_stls(
             builder.terrain_surface_mesh,
@@ -321,15 +437,20 @@ def _skip_osm_layers(
 
     A linear feature is only resolvable when its buffer >= resolution_m / 2.
     Area features (water, parks) are never skipped — they scale with feature size.
+
+    Road tier buffers: major roads 10 m, secondary roads 6 m, default/minor 4 m,
+    paths 1.5 m.  The roads layer is kept until min_buf > 10 so that major roads
+    (motorways, trunks, primary) are fetched and painted even when minor roads and
+    secondary roads are already sub-cell.  The tier-aware paint logic in
+    builder.colorize_terrain handles the per-tier skip at paint time.
     """
     skip: set[str] = set()
     if no_buildings:
         skip.update({"buildings", "building_parts"})
     min_buf = resolution_m / 2
-    if min_buf > 4.0:  # roads (max 10 m), railways (4 m), piers, road-type areas
+    if min_buf > 4.0:  # railways (4 m), road-type areas
         skip.update(
             {
-                "roads",
                 "railways",
                 "pedestrian_areas",
                 "parking",
@@ -338,6 +459,8 @@ def _skip_osm_layers(
                 "circuits",
             }
         )
+    if min_buf > 10.0:  # all road tiers are sub-cell (major roads have 10 m buffer)
+        skip.add("roads")
     if min_buf > 6.0 and not force_waterways:  # wide rivers/canals (6 m buffer)
         skip.add("waterways")
     return frozenset(skip)
@@ -347,7 +470,12 @@ def _skipped_features(resolution_m: float) -> str:
     """Return a human-readable list of linear OSM feature tiers skipped at this resolution.
 
     A linear feature is only resolvable when its buffer >= resolution_m / 2.
-    Buffers: paths 1.5 m, minor roads 4 m, secondary roads 6 m, major roads 10 m.
+    Buffers: paths 1.5 m, minor/residential roads 4 m, secondary roads 6 m,
+    major roads (motorway/trunk/primary) 10 m.
+
+    The message reflects what the tier-aware paint filter in builder.colorize_terrain
+    will actually skip at paint time, which aligns with what _skip_osm_layers
+    omits from the Overpass fetch.
     """
     min_buf = resolution_m / 2
     skipped = []
@@ -358,7 +486,7 @@ def _skipped_features(resolution_m: float) -> str:
     if min_buf > 6.0:
         skipped.append("secondary roads")
     if min_buf > 10.0:
-        skipped.append("all roads")
+        skipped.append("major roads")
     return ", ".join(skipped)
 
 
@@ -608,20 +736,8 @@ def main() -> None:
         print("ERROR: provide a location, --route <gpx-file>, or --area <geojson-file>")
         sys.exit(1)
 
-    from terrology.builder import MapBuilder
-    from terrology.exporter import export_3mf, export_color_stls, export_obj, export_stl
-    from terrology.fetcher import (
-        fetch_elevation,
-        fetch_osm_data,
-        fetch_overture_buildings,
-        supplement_buildings,
-    )
-
-    out_dir = Path(args.output)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
     route_utm: list[tuple[float, float]] | None = None
-    area_poly_utm = None  # set when --area is used
+    area_poly_utm = None  # set when --area or shape-clip is used
 
     # --- Resolve locations and compute UTM bounding box ---
     if args.area:
@@ -631,7 +747,7 @@ def main() -> None:
         bnds = area_poly_wgs84.bounds  # (min_lon, min_lat, max_lon, max_lat)
         lat = (bnds[1] + bnds[3]) / 2
         lon = (bnds[0] + bnds[2]) / 2
-        _, to_utm, from_utm = _setup_utm(lat, lon)
+        _, to_utm, _ = _setup_utm(lat, lon)
 
         from shapely.ops import transform as _shp_transform
 
@@ -659,7 +775,7 @@ def main() -> None:
         track_lons = [p[1] for p in route_latlon]
         lat = (min(track_lats) + max(track_lats)) / 2
         lon = (min(track_lons) + max(track_lons)) / 2
-        _, to_utm, from_utm = _setup_utm(lat, lon)
+        _, to_utm, _ = _setup_utm(lat, lon)
 
         route_utm = [to_utm.transform(plon, plat) for plat, plon in route_latlon]
         xs = [p[0] for p in route_utm]
@@ -689,6 +805,7 @@ def main() -> None:
                 building_exag=args.building_exag,
                 colors=args.colors,
                 no_buildings=args.no_buildings,
+                no_terrain=args.no_terrain,
                 roof_shapes=args.roof_shapes,
                 contour_interval=args.contour_interval,
                 grid_size=args.grid_size,
@@ -710,7 +827,7 @@ def main() -> None:
         lat2, lon2 = _resolve_location(args.to)
         lat = (lat1 + lat2) / 2
         lon = (lon1 + lon2) / 2
-        _, to_utm, from_utm = _setup_utm(lat, lon)
+        _, to_utm, _ = _setup_utm(lat, lon)
         x1, y1 = to_utm.transform(lon1, lat1)
         x2, y2 = to_utm.transform(lon2, lat2)
         x_min, x_max, y_min, y_max = _bbox_with_buffer([x1, x2], [y1, y2], args.buffer)
@@ -719,7 +836,7 @@ def main() -> None:
     y_span_m = y_max - y_min
 
     # Shape clipping for --to and --route: clip model to circle/hexagon.
-    # --area already has its own polygon; single-point mode is handled in run_pipeline().
+    # --area already has its own polygon; single-point mode is handled above.
     if args.shape != "square" and area_poly_utm is None:
         from shapely.geometry import Point
         from shapely.geometry import Polygon as _Polygon
@@ -740,13 +857,14 @@ def main() -> None:
         x_span_m = y_span_m = r * 2
 
         if args.shape == "circle":
-            area_poly_utm = Point(cx_utm, cy_utm).buffer(r, resolution=64)
+            area_poly_utm = Point(cx_utm, cy_utm).buffer(r, quad_segs=64)
         else:  # hexagon
             angles = [i * 2 * math.pi / 6 for i in range(6)]
             area_poly_utm = _Polygon(
                 [(cx_utm + r * math.cos(a), cy_utm + r * math.sin(a)) for a in angles]
             )
 
+    # --- Compute scale, model dimensions, and nozzle-cap grid sizes for the banner ---
     if args.scale is not None:
         scale = args.scale
     else:
@@ -754,19 +872,10 @@ def main() -> None:
     model_x_mm = x_span_m * 1000.0 / scale
     model_y_mm = y_span_m * 1000.0 / scale
 
-    # WGS84 bbox (project all four UTM corners to get correct lon/lat extent)
-    corners = [
-        from_utm.transform(x, y)
-        for x, y in [(x_min, y_min), (x_min, y_max), (x_max, y_min), (x_max, y_max)]
-    ]
-    osm_west = min(c[0] for c in corners)
-    osm_east = max(c[0] for c in corners)
-    osm_south = min(c[1] for c in corners)
-    osm_north = max(c[1] for c in corners)
-
     grid_size = args.grid_size
     color_grid_size = args.color_grid_size
     max_useful = max(20, math.floor(max(model_x_mm, model_y_mm) / (args.nozzle * 2)))
+    nozzle_cap_msg: str | None = None
     if grid_size > max_useful or color_grid_size > max_useful:
         grid_size = min(grid_size, max_useful)
         color_grid_size = min(color_grid_size, max_useful)
@@ -774,286 +883,77 @@ def main() -> None:
             4 * (args.grid_size - 1) ** 2 + 8 * (args.color_grid_size - 1) ** 2
         )
         approx_after = 4 * (grid_size - 1) ** 2 + 8 * (color_grid_size - 1) ** 2
-        print(
+        nozzle_cap_msg = (
             f"Nozzle cap: {args.nozzle} mm  →  "
             f"grids {grid_size}×{grid_size} / {color_grid_size}×{color_grid_size}  "
             f"(~{approx_after:,} faces, was ~{approx_before:,})"
         )
 
+    # --- Build the mode-specific banner ---
     if args.area and args.route:
-        print(
+        mode_banner = (
             f"\nArea      : {Path(args.area).name} + {Path(args.route).name}  |  "
             f"Span: {x_span_m:.0f} x {y_span_m:.0f} m  |  Scale: 1:{scale:.0f}"
         )
     elif args.area:
-        print(
+        mode_banner = (
             f"\nArea      : {Path(args.area).name}  |  "
             f"Span: {x_span_m:.0f} x {y_span_m:.0f} m  |  Scale: 1:{scale:.0f}"
         )
     elif args.route:
-        print(
+        mode_banner = (
             f"\nRoute     : {len(route_latlon):,} pts  |  "
             f"Span: {x_span_m:.0f} x {y_span_m:.0f} m  |  Scale: 1:{scale:.0f}"
         )
     else:
-        print(f"\nFrom      : {lat1:.5f}, {lon1:.5f}")
-        print(f"To        : {lat2:.5f}, {lon2:.5f}")
-        print(
+        # Two-point mode
+        mode_banner = (
+            f"\nFrom      : {lat1:.5f}, {lon1:.5f}\n"
+            f"To        : {lat2:.5f}, {lon2:.5f}\n"
             f"Span      : {x_span_m:.0f} x {y_span_m:.0f} m   |   Scale: 1:{scale:.0f}"
         )
-    resolution_m = max(x_span_m, y_span_m) / color_grid_size
 
-    _eff_bldg_exag = (
-        args.building_exag if args.building_exag is not None else args.terrain_exag
-    )
-    _bldg_height_mm = 20.0 * _eff_bldg_exag * 1000.0 / scale
-    no_buildings = args.no_buildings
-    if not no_buildings and _bldg_height_mm < 2 * args.nozzle:
-        no_buildings = True
-        _auto_skip_bldg = f"{_bldg_height_mm:.2f} mm"
-    else:
-        _auto_skip_bldg = None
-
-    print(f"Model size: {model_x_mm:.1f} x {model_y_mm:.1f} mm")
-    _skipped = _skipped_features(resolution_m)
-    if _skipped:
-        print(f"Resolution: {resolution_m:.1f} m/cell — skipping {_skipped} (sub-cell)")
-    if _auto_skip_bldg:
-        print(
-            f"Buildings : skipped — 20 m building = {_auto_skip_bldg} at this scale (sub-nozzle)"
-        )
-    print(f"Output    : {out_dir.resolve()}\n")
-
-    use_cache = not args.no_cache
-    elev_pad = 0.02  # degrees — ~2 km margin around the model bbox
-
-    min_bldg_area = (
-        args.min_building_area
-        if args.min_building_area is not None
-        else max(4.0, scale / 1000.0)
-    )
-    builder = MapBuilder(
+    # --- Delegate to run_pipeline ---
+    run_pipeline(
         lat=lat,
         lon=lon,
-        x_min=x_min,
-        x_max=x_max,
-        y_min=y_min,
-        y_max=y_max,
+        bbox_utm=(x_min, x_max, y_min, y_max),
+        clip_polygon_utm=area_poly_utm,
         scale=scale,
+        size=args.size,
         terrain_exag=args.terrain_exag,
-        grid_size=grid_size,
-        color_depth_mm=args.color_depth,
-        color_grid_size=color_grid_size,
-        clip_poly=area_poly_utm,
         building_exag=args.building_exag,
-        min_building_area_m2=min_bldg_area,
-        water_depth_mm=args.water_depth,
-        resolution_m=resolution_m,
-    )
-
-    # Fetch elevation, OSM features, and Overture buildings in parallel
-    osm_skip = _skip_osm_layers(
-        resolution_m, no_buildings, force_waterways=args.waterways
-    )
-    elevation = header = None
-    if not args.no_terrain:
-        from concurrent.futures import ThreadPoolExecutor
-
-        _need_ov = not no_buildings
-        print("Fetching OSM, elevation and Overture data in parallel...")
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            osm_f = executor.submit(
-                fetch_osm_data,
-                south=osm_south,
-                north=osm_north,
-                west=osm_west,
-                east=osm_east,
-                use_cache=use_cache,
-                skip_layers=osm_skip,
-            )
-            elev_f = executor.submit(
-                fetch_elevation,
-                south=osm_south - elev_pad,
-                north=osm_north + elev_pad,
-                west=osm_west - elev_pad,
-                east=osm_east + elev_pad,
-                use_cache=use_cache,
-                dem_source=args.dem,
-            )
-            ov_f = (
-                executor.submit(
-                    fetch_overture_buildings,
-                    osm_south,
-                    osm_north,
-                    osm_west,
-                    osm_east,
-                    use_cache,
-                )
-                if _need_ov
-                else None
-            )
-            osm_data = osm_f.result()
-            elevation, header = elev_f.result()
-        print(
-            f"  Elevation: {elevation.shape[1]} x {elevation.shape[0]} cells  "
-            f"(min {elevation.min():.0f} m, max {elevation.max():.0f} m)"
-        )
-    else:
-        _need_ov = not no_buildings
-        if _need_ov:
-            print("Fetching OSM and Overture data in parallel...")
-            with ThreadPoolExecutor(max_workers=2) as executor:
-                osm_f = executor.submit(
-                    fetch_osm_data,
-                    south=osm_south,
-                    north=osm_north,
-                    west=osm_west,
-                    east=osm_east,
-                    use_cache=use_cache,
-                    skip_layers=osm_skip,
-                )
-                ov_f = executor.submit(
-                    fetch_overture_buildings,
-                    osm_south,
-                    osm_north,
-                    osm_west,
-                    osm_east,
-                    use_cache,
-                )
-                osm_data = osm_f.result()
-        else:
-            print("Fetching OSM data...")
-            osm_data = fetch_osm_data(
-                south=osm_south,
-                north=osm_north,
-                west=osm_west,
-                east=osm_east,
-                use_cache=use_cache,
-                skip_layers=osm_skip,
-            )
-            ov_f = None
-
-    if args.raceway:
-        print("  Fetching circuit relation member ways...")
-        from terrology.fetcher import fetch_circuit_ways as _fetch_circuit_ways
-
-        osm_data["circuit_ways"] = _fetch_circuit_ways(
-            osm_south, osm_north, osm_west, osm_east, use_cache=use_cache
-        )
-
-    # --- Terrain ---
-    terrain_mesh = None
-    if not args.no_terrain:
-        assert elevation is not None and header is not None
-        print(f"\nBuilding terrain mesh ({grid_size}x{grid_size})...")
-        terrain_mesh = builder.build_terrain(elevation, header, osm_data)
-        export_stl(terrain_mesh, out_dir / "terrain.stl")
-
-    # --- Buildings ---
-    if not no_buildings:
-        osm_data["buildings"] = supplement_buildings(
-            osm_data.get("buildings"), ov_f.result()
-        )
-
-    buildings_mesh = None
-    if not no_buildings:
-        print("\nExtruding buildings...")
-        buildings_mesh = builder.build_buildings(
-            osm_data, with_roof_shapes=args.roof_shapes
-        )
-        if buildings_mesh is not None:
-            export_stl(buildings_mesh, out_dir / "buildings.stl")
-
-    # --- Colour terrain surface ---
-    terrain_face_colors = None
-    if terrain_mesh is not None:
-        assert builder.terrain_surface_mesh is not None
-        print("\nColouring terrain faces...")
-        terrain_face_colors = builder.colorize_terrain(
-            builder.terrain_surface_mesh,
-            osm_data,
-            contour_interval_m=args.contour_interval,
-            waterway_min_width_mm=args.waterway_width if args.waterways else None,
-        )
-        terrain_face_colors = _limit_colors(terrain_face_colors, args.colors)
-        if args.raceway:
-            print("\nHighlighting raceway...")
-            terrain_face_colors = builder.colorize_raceway(
-                builder.terrain_surface_mesh,
-                osm_data,
-                width_mm=args.raceway_width,
-                base_colors=terrain_face_colors,
-            )
-        if args.route:
-            assert route_utm is not None
-            print("\nPainting route on terrain faces...")
-            terrain_face_colors = builder.colorize_route(
-                builder.terrain_surface_mesh,
-                route_utm,
-                width_mm=args.route_width,
-                base_colors=terrain_face_colors,
-            )
-
-    # --- Per-colour STLs (for slicers that can't use MTL) ---
-    if terrain_face_colors is not None:
-        print("\nExporting per-colour STLs...")
-        export_color_stls(
-            builder.terrain_surface_mesh,
-            terrain_face_colors,
-            out_dir,
-            color_depth_mm=args.color_depth,
-        )
-
-    # --- Combined coloured OBJ ---
-    parts = {
-        "terrain_base": builder.terrain_base_mesh,
-        "terrain_top": builder.terrain_surface_mesh,
-        "buildings": buildings_mesh,
-    }
-    parts = {k: v for k, v in parts.items() if v is not None}
-
-    if args.border_width > 0:
-        from terrology.builder import _BASE_THICKNESS_MM
-        from terrology.decorations import make_frame_mesh
-
-        base_z = -_BASE_THICKNESS_MM
-        parts["border"] = make_frame_mesh(
-            model_x_mm,
-            model_y_mm,
-            args.border_width,
-            base_z,
-            clip_poly_mm=builder.clip_poly_mm,
-        )
-
-    print("\nExporting OBJ...")
-    export_obj(
-        parts,
-        out_dir / "model.obj",
-        terrain_face_colors=terrain_face_colors,
-        n_colors=args.colors,
-    )
-
-    print("Exporting 3MF...")
-    export_3mf(
-        parts,
-        out_dir / "model.3mf",
-        terrain_face_colors=terrain_face_colors,
+        colors=args.colors,
+        no_buildings=args.no_buildings,
+        no_terrain=args.no_terrain,
+        roof_shapes=args.roof_shapes,
+        contour_interval=args.contour_interval,
+        grid_size=grid_size,
+        color_grid_size=color_grid_size,
         color_depth_mm=args.color_depth,
-        n_colors=args.colors,
+        nozzle=args.nozzle,
+        output_dir=args.output,
+        no_cache=args.no_cache,
+        min_building_area=args.min_building_area,
+        water_depth_mm=args.water_depth,
+        border_width_mm=args.border_width,
+        dem_source=args.dem,
+        raceway=args.raceway,
+        raceway_width=args.raceway_width,
+        waterways=args.waterways,
+        waterway_width=args.waterway_width,
+        route_points_utm=route_utm,
+        route_width=args.route_width,
+        _mode_banner=mode_banner,
+        _nozzle_cap_message=nozzle_cap_msg,
     )
-
-    print("\nDone!")
-    for name, mesh in parts.items():
-        e = mesh.extents  # type: ignore[union-attr]
-        if e is not None:
-            print(f"  {name:<12} {e[0]:.1f} x {e[1]:.1f} x {e[2]:.1f} mm")
 
 
 def _limit_colors(face_colors, n_total: int):
     """
     Merge terrain feature colours so the total filament count stays within
-    n_total.  Buildings (slot 5) are a separate mesh object handled by the
-    exporter, not a face colour, so all n_total slots are available for
+    n_total.  Buildings (colour index 4) are a separate mesh object handled by
+    the exporter, not a face colour, so all n_total slots are available for
     terrain-surface features.
 
     Merge order (least important first):
@@ -1147,7 +1047,7 @@ def make_shape_polygon(lat: float, lon: float, radius: float, shape: str):
     cx, cy = to_utm.transform(lon, lat)
 
     if shape == "circle":
-        poly_utm = Point(cx, cy).buffer(radius, resolution=64)
+        poly_utm = Point(cx, cy).buffer(radius, quad_segs=64)
     elif shape == "hexagon":
         angles = [i * 2 * math.pi / 6 for i in range(6)]
         points = [

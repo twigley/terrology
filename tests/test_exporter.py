@@ -361,3 +361,52 @@ def test_export_3mf_sand_in_basematerials(tmp_path):
     with zipfile.ZipFile(str(out)) as zf:
         model = zf.read("3D/3dmodel.model").decode()
     assert 'name="sand"' in model
+
+
+def test_export_3mf_large_mesh_format(tmp_path):
+    """Verify that optimized vertex/triangle writing produces correct XML format.
+
+    This test uses a moderately large mesh (~100k faces) to exercise the bulk
+    string building path and verify that the output format is identical to before.
+    """
+    import re
+    import zipfile
+
+    from terrology.exporter import export_3mf
+
+    # Create a large mesh to test performance optimization
+    mesh = _flat_mesh(100)
+    fc = np.zeros(len(mesh.faces), dtype=np.int32)
+
+    out = tmp_path / "model.3mf"
+    export_3mf({"terrain_top": mesh}, out, terrain_face_colors=fc)
+
+    with zipfile.ZipFile(str(out)) as zf:
+        model = zf.read("3D/3dmodel.model").decode()
+
+    # Verify XML structure is intact
+    assert "<vertices>" in model
+    assert "</vertices>" in model
+    assert "<triangles>" in model
+    assert "</triangles>" in model
+
+    # Verify vertex format: x, y, z with .4f precision
+    vertex_matches = re.findall(
+        r'<vertex x="([\d.]+)" y="([\d.]+)" z="([\d.-]+)"/>', model
+    )
+    assert len(vertex_matches) == len(mesh.vertices), (
+        f"Expected {len(mesh.vertices)} vertices, got {len(vertex_matches)}"
+    )
+    # Check that format includes 4 decimal places
+    for x, y, z in vertex_matches[:5]:  # Sample first few
+        assert "." in x and len(x.split(".")[1]) == 4, (
+            f"Vertex x should have 4 decimals: {x}"
+        )
+
+    # Verify triangle format: v1, v2, v3 as integers
+    triangle_matches = re.findall(
+        r'<triangle v1="(\d+)" v2="(\d+)" v3="(\d+)"/>', model
+    )
+    assert len(triangle_matches) == len(mesh.faces), (
+        f"Expected {len(mesh.faces)} triangles, got {len(triangle_matches)}"
+    )

@@ -39,8 +39,12 @@ def load_osm(
 ) -> dict | None:
     pkl = _osm_path(south, north, west, east, skip_layers) / "features.pkl"
     if pkl.exists():
-        with open(pkl, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(pkl, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            # Cache miss on corruption; the file will be overwritten on next save
+            return None
     return None
 
 
@@ -82,10 +86,14 @@ def load_elevation(south, north, west, east, demtype: str):
     npz_file = path / "data.npz"
     hdr_file = path / "header.json"
     if npz_file.exists() and hdr_file.exists():
-        arr = np.load(npz_file)["elevation"]
-        with open(hdr_file) as f:
-            header = json.load(f)
-        return arr, header
+        try:
+            arr = np.load(npz_file)["elevation"]
+            with open(hdr_file) as f:
+                header = json.load(f)
+            return arr, header
+        except Exception:
+            # Cache miss on corruption; the file will be overwritten on next save
+            return None
     return None
 
 
@@ -120,8 +128,12 @@ _CIRCUIT_WAYS_PKL = "circuit_ways_v2.pkl"
 def load_circuit_ways(south: float, north: float, west: float, east: float):
     pkl = _circuit_ways_path(south, north, west, east) / _CIRCUIT_WAYS_PKL
     if pkl.exists():
-        with open(pkl, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(pkl, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            # Cache miss on corruption; the file will be overwritten on next save
+            return None
     return None
 
 
@@ -150,8 +162,12 @@ def _overture_path(south: float, north: float, west: float, east: float) -> Path
 def load_overture_buildings(south: float, north: float, west: float, east: float):
     pkl = _overture_path(south, north, west, east) / "buildings.pkl"
     if pkl.exists():
-        with open(pkl, "rb") as f:
-            return pickle.load(f)
+        try:
+            with open(pkl, "rb") as f:
+                return pickle.load(f)
+        except Exception:
+            # Cache miss on corruption; the file will be overwritten on next save
+            return None
     return None
 
 

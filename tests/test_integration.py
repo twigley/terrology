@@ -212,7 +212,7 @@ def test_buildings_clipped_to_circle_polygon(tmp_path):
 
     # Circle clip polygon with radius 200 m
     cx, cy = to_utm.transform(_LON, _LAT)
-    circle_utm = Point(cx, cy).buffer(200, resolution=32)
+    circle_utm = Point(cx, cy).buffer(200, quad_segs=32)
     clip_wgs84 = _shp_transform(lambda x, y: from_utm.transform(x, y), circle_utm)
 
     # Building whose footprint straddles the circle edge (placed 190 m from centre, 60 m wide)
@@ -914,4 +914,150 @@ def test_two_point_explicit_scale(tmp_path):
             "--no-cache",
         ]
     )
+    assert (tmp_path / "model.obj").exists()
+
+
+# ================================================================== #
+# run_pipeline — new keyword parameters (route_points_utm, bbox_utm,
+# clip_polygon_utm, no_terrain)
+# ================================================================== #
+
+
+def test_run_pipeline_with_route_points_utm(tmp_path):
+    """run_pipeline accepts route_points_utm and paints route colour on the surface.
+
+    This is the primary path for web-app route maps — previously the web app
+    had no way to request route painting because run_pipeline lacked the param.
+    """
+    from pyproj import CRS, Transformer
+
+    from terrology.builder import _utm_crs
+
+    utm_crs = _utm_crs(_LON, _LAT)
+    wgs84 = CRS.from_epsg(4326)
+    to_utm = Transformer.from_crs(wgs84, utm_crs, always_xy=True)
+
+    # Diagonal route across the test area
+    route_latlon = [
+        (51.497, -0.128),
+        (51.500, -0.120),
+        (51.503, -0.112),
+    ]
+    route_utm = [to_utm.transform(lon, lat) for lat, lon in route_latlon]
+
+    params = {**_FAST, "color_grid_size": 80}
+    with (
+        patch("terrology.fetcher.fetch_osm_data", return_value=_empty_osm()),
+        patch("terrology.fetcher.fetch_elevation", return_value=_flat_elev()),
+    ):
+        run_pipeline(
+            **params,
+            output_dir=tmp_path,
+            route_points_utm=route_utm,
+            route_width=8.0,
+            skip_stls=True,
+        )
+
+    obj = (tmp_path / "model.obj").read_text()
+    assert "usemtl route" in obj
+    mtl = (tmp_path / "model.mtl").read_text()
+    assert "newmtl route" in mtl
+
+
+def test_run_pipeline_with_bbox_utm(tmp_path):
+    """run_pipeline accepts a pre-computed bbox_utm and uses it instead of radius."""
+    from pyproj import CRS, Transformer
+
+    from terrology.builder import _utm_crs
+
+    utm_crs = _utm_crs(_LON, _LAT)
+    wgs84 = CRS.from_epsg(4326)
+    to_utm = Transformer.from_crs(wgs84, utm_crs, always_xy=True)
+
+    cx, cy = to_utm.transform(_LON, _LAT)
+    half = 300.0
+    bbox = (cx - half, cx + half, cy - half, cy + half)
+
+    with (
+        patch("terrology.fetcher.fetch_osm_data", return_value=_empty_osm()),
+        patch("terrology.fetcher.fetch_elevation", return_value=_flat_elev()),
+    ):
+        run_pipeline(
+            lat=_LAT,
+            lon=_LON,
+            bbox_utm=bbox,
+            grid_size=10,
+            color_grid_size=20,
+            no_cache=True,
+            output_dir=tmp_path,
+            skip_stls=True,
+        )
+
+    assert (tmp_path / "model.obj").exists()
+
+
+def test_run_pipeline_with_clip_polygon_utm(tmp_path):
+    """run_pipeline accepts a pre-projected UTM clip polygon."""
+    from pyproj import CRS, Transformer
+    from shapely.geometry import Point
+
+    from terrology.builder import _utm_crs
+
+    utm_crs = _utm_crs(_LON, _LAT)
+    wgs84 = CRS.from_epsg(4326)
+    to_utm = Transformer.from_crs(wgs84, utm_crs, always_xy=True)
+
+    cx, cy = to_utm.transform(_LON, _LAT)
+    circle_utm = Point(cx, cy).buffer(250, quad_segs=16)
+
+    with (
+        patch("terrology.fetcher.fetch_osm_data", return_value=_empty_osm()),
+        patch("terrology.fetcher.fetch_elevation", return_value=_flat_elev()),
+    ):
+        run_pipeline(
+            lat=_LAT,
+            lon=_LON,
+            radius=_RADIUS,
+            clip_polygon_utm=circle_utm,
+            grid_size=10,
+            color_grid_size=20,
+            no_cache=True,
+            output_dir=tmp_path,
+            skip_stls=True,
+        )
+
+    assert (tmp_path / "model.obj").exists()
+
+
+def test_run_pipeline_no_terrain(tmp_path):
+    """run_pipeline with no_terrain=True skips terrain files but still produces OBJ."""
+    from shapely.geometry import Polygon
+
+    footprint = Polygon(
+        [
+            (_LON - 0.0005, _LAT - 0.0003),
+            (_LON + 0.0005, _LAT - 0.0003),
+            (_LON + 0.0005, _LAT + 0.0003),
+            (_LON - 0.0005, _LAT + 0.0003),
+        ]
+    )
+    osm = _empty_osm()
+    osm["buildings"] = _wgs84_gdf(footprint, building=["yes"], height=["10"])
+
+    with (
+        patch("terrology.fetcher.fetch_osm_data", return_value=osm),
+        patch(
+            "terrology.fetcher.fetch_overture_buildings",
+            return_value=gpd.GeoDataFrame(),
+        ),
+    ):
+        run_pipeline(
+            **_FAST,
+            output_dir=tmp_path,
+            no_terrain=True,
+            skip_stls=True,
+        )
+
+    assert not (tmp_path / "terrain.stl").exists()
+    # OBJ is produced (may have buildings or be nearly empty without terrain)
     assert (tmp_path / "model.obj").exists()

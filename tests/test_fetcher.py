@@ -65,6 +65,25 @@ def test_parse_aaigrid_dtype():
     assert arr.dtype == np.float32
 
 
+def test_parse_aaigrid_loadtxt_identical_output():
+    """Verify that the new np.loadtxt approach produces identical output to the previous method."""
+    arr1, header1 = _parse_aaigrid(SIMPLE_GRID)
+    arr2, header2 = _parse_aaigrid(NODATA_GRID)
+    # Both should be float32
+    assert arr1.dtype == np.float32
+    assert arr2.dtype == np.float32
+    # Shape should be correct
+    assert arr1.shape == (2, 3)
+    assert arr2.shape == (2, 3)
+    # Values should be as expected
+    expected1 = np.array([[1, 2, 3], [4, 5, 6]], dtype=np.float32)
+    np.testing.assert_array_equal(arr1, expected1)
+    # NaN handling should work
+    assert not np.any(np.isnan(arr2)), (
+        "nodata should be filled with nearest valid values"
+    )
+
+
 def test_parse_aaigrid_nodata_filled():
     arr, _ = _parse_aaigrid(NODATA_GRID)
     assert not np.any(np.isnan(arr))

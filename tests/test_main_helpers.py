@@ -252,7 +252,7 @@ def test_load_area_uses_first_feature(tmp_path):
 
 
 # ------------------------------------------------------------------ #
-# _skip_osm_layers — forced waterways
+# _skip_osm_layers — road tier thresholds and forced waterways
 # ------------------------------------------------------------------ #
 
 
@@ -276,3 +276,78 @@ def test_skip_osm_layers_fine_resolution_keeps_waterways():
     from terrology.cli import _skip_osm_layers
 
     assert "waterways" not in _skip_osm_layers(4.0, no_buildings=False)
+
+
+def test_skip_osm_layers_roads_kept_until_major_threshold():
+    """Roads layer must not be dropped until min_buf > 10 m (major-road buffer).
+
+    At resolution_m=16 the min_buf is 8 m — minor roads and secondary roads
+    are sub-cell, but major roads (10 m buffer) are still resolvable.
+    The layer must be fetched so the builder can paint major roads.
+    """
+    from terrology.cli import _skip_osm_layers
+
+    skip = _skip_osm_layers(16.0, no_buildings=False)
+    assert "roads" not in skip
+    # railways (4 m buffer) and other non-road layers are still skipped
+    assert "railways" in skip
+
+
+def test_skip_osm_layers_roads_dropped_above_major_threshold():
+    """Roads layer must be dropped when min_buf > 10 m (all tiers sub-cell)."""
+    from terrology.cli import _skip_osm_layers
+
+    # resolution_m=22 → min_buf=11 > 10
+    skip = _skip_osm_layers(22.0, no_buildings=False)
+    assert "roads" in skip
+
+
+def test_skip_osm_layers_roads_kept_at_old_minor_threshold():
+    """Regression: roads must NOT be skipped at the old threshold (min_buf just above 4).
+
+    Before the fix, roads were dropped at min_buf > 4.  Now they stay until min_buf > 10
+    so that major roads are still fetched and painted at intermediate scales.
+    """
+    from terrology.cli import _skip_osm_layers
+
+    # resolution_m=10 → min_buf=5, above old threshold (4) but below new (10)
+    skip = _skip_osm_layers(10.0, no_buildings=False)
+    assert "roads" not in skip
+
+
+def test_skip_osm_layers_railways_dropped_at_minor_threshold():
+    """Railways (4 m buffer) should still be dropped when min_buf > 4."""
+    from terrology.cli import _skip_osm_layers
+
+    skip = _skip_osm_layers(10.0, no_buildings=False)
+    assert "railways" in skip
+
+
+# ------------------------------------------------------------------ #
+# _skipped_features — human-readable message consistency
+# ------------------------------------------------------------------ #
+
+
+def test_skipped_features_major_roads_message():
+    """At very coarse resolution (all roads sub-cell) message says 'major roads'."""
+    from terrology.cli import _skipped_features
+
+    msg = _skipped_features(22.0)  # min_buf=11 > 10
+    assert "major roads" in msg
+
+
+def test_skipped_features_no_all_roads_message():
+    """'all roads' must never appear — that phrasing was replaced by 'major roads'."""
+    from terrology.cli import _skipped_features
+
+    for res in (5.0, 10.0, 22.0, 50.0):
+        assert "all roads" not in _skipped_features(res)
+
+
+def test_skipped_features_secondary_only():
+    """At min_buf between 6 and 10, secondary roads appear but not 'major roads'."""
+    from terrology.cli import _skipped_features
+
+    msg = _skipped_features(14.0)  # min_buf=7: secondary skipped, major not yet
+    assert "secondary roads" in msg
+    assert "major roads" not in msg
