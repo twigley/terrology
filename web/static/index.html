@@ -35,14 +35,15 @@
 
     <!-- Mode toggle -->
     <div class="field">
-        <label>Map area</label>
-        <div class="seg-control" id="mode-control">
-            <button class="seg-btn active" data-mode="pin">Centre + radius</button>
-            <button class="seg-btn" data-mode="area">Draw polygon</button>
+        <label>Mode</label>
+        <div class="seg-control seg-control-3" id="mode-control">
+            <button class="seg-btn active" data-mode="pin">Pin</button>
+            <button class="seg-btn" data-mode="area">Draw area</button>
+            <button class="seg-btn" data-mode="route">Route</button>
         </div>
     </div>
 
-    <!-- Pin status -->
+    <!-- Coords / status display -->
     <div id="coords-display" class="field hidden">
         <label id="coords-label">Selected location</label>
         <span id="coords-text">—</span>
@@ -50,51 +51,109 @@
     </div>
     <p id="no-pin-msg" class="hint">Click the map to set a location</p>
 
-    <!-- Pin-only controls -->
-    <div id="pin-options">
-        <!-- Radius -->
-        <div class="field">
-            <label>Half-width — <span id="radius-val">500</span> m</label>
-            <input id="radius" type="range" min="100" max="5000" step="50" value="500"/>
-        </div>
+    <!-- ── Group 1: Map area ─────────────────────────────────────────────── -->
+    <details class="group" open>
+        <summary>Map area</summary>
 
-        <!-- Shape -->
-        <div class="field">
-            <label>Map shape</label>
-            <div class="seg-control" id="shape-control">
-                <button class="seg-btn active" data-shape="square">Square</button>
-                <button class="seg-btn" data-shape="circle">Circle</button>
-                <button class="seg-btn" data-shape="hexagon">Hexagon</button>
+        <!-- Pin mode block -->
+        <div id="pin-options">
+            <div class="field">
+                <label>Half-width — <span id="radius-val">500</span> m</label>
+                <input id="radius" type="range" min="100" max="5000" step="50" value="500"/>
+            </div>
+            <div class="field">
+                <label>Map shape</label>
+                <div class="seg-control" id="shape-control">
+                    <button class="seg-btn active" data-shape="square">Square</button>
+                    <button class="seg-btn" data-shape="circle">Circle</button>
+                    <button class="seg-btn" data-shape="hexagon">Hexagon</button>
+                </div>
             </div>
         </div>
-    </div>
 
-    <!-- Draw-mode hint (replaces no-pin-msg in draw mode) -->
-    <p id="draw-hint" class="hint hidden">Click the map to add vertices — double-click to close the polygon</p>
+        <!-- Area mode block -->
+        <div id="area-options" class="hidden">
+            <p id="draw-hint" class="hint">Click the map to add vertices — double-click to close the polygon</p>
+            <div class="field">
+                <label>Import GeoJSON</label>
+                <input id="geojson-file" type="file" accept=".geojson,.json" class="file-input"/>
+                <span class="field-hint">Polygon or FeatureCollection — holes are not supported.</span>
+            </div>
+            <div class="field">
+                <label>Boundary smoothing — <span id="smooth-val">0</span> iterations</label>
+                <input id="smooth-boundary" type="range" min="0" max="6" step="1" value="0"/>
+                <span class="field-hint">Chaikin corner-cutting — rounds polygon corners.</span>
+            </div>
+        </div>
 
-    <!-- Exaggeration -->
-    <div class="field">
-        <label>Terrain exaggeration — <span id="exag-val">2.0</span>×</label>
-        <input id="exag" type="range" min="1.0" max="4.0" step="0.5" value="2.0"/>
-    </div>
+        <!-- Route mode block -->
+        <div id="route-options" class="hidden">
+            <div class="field">
+                <label>GPX file</label>
+                <input id="gpx-file" type="file" accept=".gpx" class="file-input"/>
+            </div>
+            <p class="hint">Or click two points on the map to define a span.</p>
+            <div class="field">
+                <label>Route width — <span id="route-width-val">1.5</span> mm</label>
+                <input id="route-width" type="range" min="0.5" max="5.0" step="0.1" value="1.5"/>
+            </div>
+            <div class="field">
+                <label>Span buffer — <span id="span-buffer-val">0.05</span></label>
+                <input id="span-buffer" type="range" min="0" max="0.5" step="0.05" value="0.05"/>
+                <span class="field-hint">Fractional margin around route bounding box.</span>
+            </div>
+            <div class="field">
+                <button id="add-clip-polygon-btn" class="secondary-sm">Add clip polygon</button>
+                <span class="field-hint">Draw a polygon to clip the route map area.</span>
+            </div>
+        </div>
 
-    <!-- Colours -->
-    <div class="field">
-        <label>Filament slots</label>
-        <select id="colors">
-            <option value="1">1 — terrain only</option>
-            <option value="2">2 — + water</option>
-            <option value="3">3 — + roads</option>
-            <option value="4" selected>4 — + parks (recommended)</option>
-            <option value="5">5 — + buildings</option>
-            <option value="6">6 — + railways</option>
-            <option value="7">7 — + beach / sand</option>
-        </select>
-    </div>
+    </details>
 
-    <!-- Advanced -->
-    <details class="advanced">
-        <summary>Advanced options</summary>
+    <!-- ── Group 2: Model ────────────────────────────────────────────────── -->
+    <details class="group" open>
+        <summary>Model</summary>
+
+        <div class="field">
+            <label>Size / scale</label>
+            <div class="seg-control" id="size-scale-control">
+                <button class="seg-btn active" data-sizemode="size">Size (mm)</button>
+                <button class="seg-btn" data-sizemode="scale">Scale 1:N</button>
+            </div>
+        </div>
+        <div id="size-input-wrap" class="field">
+            <label>Longest dimension — <span id="size-val">190</span> mm</label>
+            <input id="size-slider" type="range" min="100" max="256" step="5" value="190"/>
+        </div>
+        <div id="scale-input-wrap" class="field hidden">
+            <label>Scale 1:</label>
+            <input id="scale-input" type="number" min="1000" max="250000" step="100" value="5000" placeholder="e.g. 25000"/>
+            <span id="scale-size-hint" class="field-hint"></span>
+        </div>
+
+        <div class="field">
+            <label>Filament slots</label>
+            <select id="colors">
+                <option value="1">1 — terrain only</option>
+                <option value="2">2 — + water</option>
+                <option value="3">3 — + roads</option>
+                <option value="4" selected>4 — + parks (recommended)</option>
+                <option value="5">5 — + buildings</option>
+                <option value="6">6 — + railways</option>
+                <option value="7">7 — + beach / sand</option>
+            </select>
+        </div>
+
+        <div class="field">
+            <label>Terrain exaggeration — <span id="exag-val">2.0</span>×</label>
+            <input id="exag" type="range" min="1.0" max="4.0" step="0.5" value="2.0"/>
+        </div>
+
+    </details>
+
+    <!-- ── Group 3: Features ─────────────────────────────────────────────── -->
+    <details class="group">
+        <summary>Features</summary>
 
         <div class="field">
             <label class="checkbox-label">
@@ -122,13 +181,48 @@
             <span class="field-hint">Keep waterways visible on large maps where they'd normally be too thin to print.</span>
         </div>
         <div class="field">
+            <label class="checkbox-label">
+                <input id="no-terrain" type="checkbox"/>
+                Skip terrain (buildings only)
+            </label>
+            <span class="field-hint">Outputs only building geometry — no terrain mesh.</span>
+        </div>
+        <div class="field">
+            <label>Contour interval (metres, optional)</label>
+            <input id="contour" type="number" min="1" step="1" placeholder="e.g. 50"/>
+        </div>
+        <div class="field">
+            <label>Elevation source</label>
+            <select id="dem-source">
+                <option value="glo30" selected>Copernicus GLO-30 (default)</option>
+                <option value="aw3d30">ALOS AW3D30 — optical, better bridge decks</option>
+                <option value="srtm">SRTM GL1 — radar, similar to GLO-30</option>
+            </select>
+            <span id="dem-hint" class="field-hint hidden">AW3D30 and SRTM require an <a href="https://opentopography.org" target="_blank">OpenTopography</a> API key — run <code>uv run main.py --save-api-key &lt;key&gt;</code> on the server.</span>
+        </div>
+
+    </details>
+
+    <!-- ── Group 4: Fine-tuning ──────────────────────────────────────────── -->
+    <details class="group">
+        <summary>Fine-tuning</summary>
+
+        <div class="field">
             <label>Building exaggeration — <span id="bldg-exag-val">match terrain</span></label>
             <input id="bldg-exag" type="range" min="0" max="4.0" step="0.5" value="0"/>
             <span class="field-hint">0 = same as terrain exaggeration</span>
         </div>
         <div class="field">
-            <label>Contour interval (metres, optional)</label>
-            <input id="contour" type="number" min="1" step="1" placeholder="e.g. 50"/>
+            <label>Raceway width — <span id="raceway-width-val">1.5</span> mm</label>
+            <input id="raceway-width" type="range" min="0.5" max="5.0" step="0.1" value="1.5"/>
+        </div>
+        <div class="field">
+            <label>Waterway width — <span id="waterway-width-val">1.0</span> mm</label>
+            <input id="waterway-width" type="range" min="0.2" max="5.0" step="0.1" value="1.0"/>
+        </div>
+        <div class="field">
+            <label>Colour depth — <span id="color-depth-val">1.5</span> mm</label>
+            <input id="color-depth" type="range" min="0.5" max="3.0" step="0.1" value="1.5"/>
         </div>
         <div class="field">
             <label>Water depth — <span id="water-val">0.8</span> mm</label>
@@ -140,17 +234,14 @@
             <span class="field-hint">0 = no border. Recommended: 6–8 mm.</span>
         </div>
         <div class="field">
-            <label>Elevation source</label>
-            <select id="dem-source">
-                <option value="glo30" selected>Copernicus GLO-30 (default)</option>
-                <option value="aw3d30">ALOS AW3D30 — optical, better bridge decks</option>
-                <option value="srtm">SRTM GL1 — radar, similar to GLO-30</option>
-            </select>
-            <span id="dem-hint" class="field-hint hidden">AW3D30 and SRTM require an <a href="https://opentopography.org" target="_blank">OpenTopography</a> API key — run <code>uv run main.py --save-api-key &lt;key&gt;</code> on the server.</span>
+            <label>Min building area (m²)</label>
+            <input id="min-building-area" type="number" min="0" max="500" step="1" placeholder="auto"/>
+            <span class="field-hint">Blank = auto. Set a value to filter small buildings.</span>
         </div>
+
     </details>
 
-    <p class="hint">Approx. scale: 1:<span id="scale-display">3158</span> — smallest visible feature: ~<span id="min-feature">2</span> m</p>
+    <p class="hint" id="scale-hint">Approx. scale: 1:<span id="scale-display">3158</span> — smallest visible feature: ~<span id="min-feature">2</span> m</p>
 
     <div class="divider"></div>
 

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from web.app import _rate_limit_key, app
+from web.app import JobParams, _rate_limit_key, app
 from web.jobs import JobStatus, store
 
 
@@ -278,3 +279,376 @@ class TestJobStore:
 
         assert store.get("job1") is None, "Expired job should be deleted"
         assert store.get("job2") is not None, "Recent job should remain"
+
+
+class TestJobParamsValidation:
+    """Test JobParams field validation."""
+
+    # --- Route validation ---
+
+    def test_route_too_few_points(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, route=[[0.0, 51.5]])
+
+    def test_route_too_many_points(self):
+        route = [[float(i % 360 - 180), float(i % 180 - 90)] for i in range(5001)]
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, route=route)
+
+    def test_route_out_of_bounds_lon(self):
+        with pytest.raises(Exception):
+            JobParams(route=[[200.0, 51.5], [-0.1, 51.5]])
+
+    def test_route_out_of_bounds_lat(self):
+        with pytest.raises(Exception):
+            JobParams(route=[[-0.1, 95.0], [-0.1, 51.5]])
+
+    def test_route_three_element_point(self):
+        with pytest.raises(Exception):
+            JobParams(route=[[-0.1, 51.5, 100.0], [-0.1, 51.6]])
+
+    def test_valid_route_without_lat_lon(self):
+        params = JobParams(route=[[-0.1, 51.5], [-0.2, 51.6]])
+        assert params.route is not None
+        assert len(params.route) == 2
+
+    def test_route_and_to_lat_mutually_exclusive(self):
+        with pytest.raises(Exception):
+            JobParams(
+                lat=51.5,
+                lon=-0.1,
+                route=[[-0.1, 51.5], [-0.2, 51.6]],
+                to_lat=51.7,
+                to_lon=-0.3,
+            )
+
+    # --- Two-point mode ---
+
+    def test_to_lat_without_to_lon(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, to_lat=51.7)
+
+    def test_to_lon_without_to_lat(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, to_lon=-0.3)
+
+    def test_two_point_without_lat_lon(self):
+        with pytest.raises(Exception):
+            JobParams(to_lat=51.7, to_lon=-0.3)
+
+    def test_valid_two_point(self):
+        params = JobParams(lat=51.5, lon=-0.1, to_lat=51.7, to_lon=-0.3)
+        assert params.to_lat == 51.7
+        assert params.to_lon == -0.3
+
+    def test_to_lat_to_lon_and_polygon_mutually_exclusive(self):
+        with pytest.raises(Exception):
+            JobParams(
+                lat=51.5,
+                lon=-0.1,
+                to_lat=51.7,
+                to_lon=-0.3,
+                polygon=[[-0.2, 51.4], [-0.1, 51.4], [-0.1, 51.6], [-0.2, 51.6]],
+            )
+
+    # --- Bounds validation ---
+
+    def test_size_too_small(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, size=99.0)
+
+    def test_size_too_large(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, size=257.0)
+
+    def test_scale_too_small(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, scale=999.0)
+
+    def test_route_width_too_small(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, route_width=0.4)
+
+    def test_smooth_boundary_too_large(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, smooth_boundary=7)
+
+    def test_color_depth_mm_too_small(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, color_depth_mm=0.4)
+
+    def test_min_building_area_negative(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, min_building_area=-1.0)
+
+    # --- no_terrain conflicts ---
+
+    def test_no_terrain_and_no_buildings(self):
+        with pytest.raises(Exception):
+            JobParams(lat=51.5, lon=-0.1, no_terrain=True, no_buildings=True)
+
+    def test_no_terrain_and_route(self):
+        with pytest.raises(Exception):
+            JobParams(no_terrain=True, route=[[-0.1, 51.5], [-0.2, 51.6]])
+
+    # --- Span abuse guard ---
+
+    def test_route_span_too_large(self):
+        # Points ~400 km apart
+        with pytest.raises(Exception, match="300 km"):
+            JobParams(route=[[-5.0, 50.0], [5.0, 53.0]])
+
+    def test_two_point_span_too_large(self):
+        with pytest.raises(Exception, match="300 km"):
+            JobParams(lat=50.0, lon=-5.0, to_lat=54.0, to_lon=5.0)
+
+    # --- Backward-compat ---
+
+    def test_existing_pin_payload_still_valid(self):
+        params = JobParams(lat=51.5, lon=-0.1, radius=500)
+        assert params.lat == 51.5
+        assert params.lon == -0.1
+        assert params.radius == 500
+
+    # --- TestClient 422 checks ---
+
+    def test_client_route_too_few_points_returns_422(self):
+        client = TestClient(app)
+        with patch("web.app.run_job"):
+            resp = client.post(
+                "/api/jobs",
+                json={"route": [[0.0, 51.5]]},
+            )
+        assert resp.status_code == 422
+
+    def test_client_no_terrain_no_buildings_returns_422(self):
+        client = TestClient(app)
+        with patch("web.app.run_job"):
+            resp = client.post(
+                "/api/jobs",
+                json={
+                    "lat": 51.5,
+                    "lon": -0.1,
+                    "no_terrain": True,
+                    "no_buildings": True,
+                },
+            )
+        assert resp.status_code == 422
+
+
+class TestWorkerParamMapping:
+    """Test _worker correctly maps JobParams to run_pipeline kwargs."""
+
+    def _run_worker(self, params: dict, tmp_path):
+        """Call _worker in-process with run_pipeline patched, return captured kwargs."""
+        from web.generate import _worker
+
+        captured = {}
+
+        def fake_run_pipeline(**kwargs):
+            captured.update(kwargs)
+
+        with patch("terrology.cli.run_pipeline", side_effect=fake_run_pipeline):
+            _worker(json.dumps(params), str(tmp_path))
+
+        return captured
+
+    def test_route_job_lat_lon_midpoint(self, tmp_path):
+        """Route mode: lat/lon must equal the track midpoints."""
+        route = [[-0.1, 51.4], [-0.2, 51.6]]
+        params = {
+            "route": route,
+            "terrain_exag": 2.0,
+            "colors": 4,
+            "span_buffer": 0.05,
+            "route_width": 1.5,
+        }
+        kwargs = self._run_worker(params, tmp_path)
+
+        expected_lat = (51.4 + 51.6) / 2
+        expected_lon = (-0.1 + -0.2) / 2
+        assert abs(kwargs["lat"] - expected_lat) < 1e-9
+        assert abs(kwargs["lon"] - expected_lon) < 1e-9
+
+    def test_route_job_bbox_utm(self, tmp_path):
+        """Route mode: bbox_utm must match independently computed value."""
+        from terrology.cli import _bbox_with_buffer, _setup_utm
+
+        route = [[-0.1, 51.4], [-0.2, 51.6]]
+        span_buffer = 0.05
+        params = {
+            "route": route,
+            "terrain_exag": 2.0,
+            "colors": 4,
+            "span_buffer": span_buffer,
+        }
+        kwargs = self._run_worker(params, tmp_path)
+
+        lat = (51.4 + 51.6) / 2
+        lon = (-0.1 + -0.2) / 2
+        _, to_utm, _ = _setup_utm(lat, lon)
+        pts_utm = [to_utm.transform(rlon, rlat) for rlon, rlat in route]
+        xs = [p[0] for p in pts_utm]
+        ys = [p[1] for p in pts_utm]
+        expected_bbox = _bbox_with_buffer(xs, ys, span_buffer)
+
+        assert kwargs["bbox_utm"] == pytest.approx(expected_bbox, rel=1e-6)
+
+    def test_route_job_route_points_utm_length_and_endpoints(self, tmp_path):
+        """Route mode: route_points_utm has the right length and endpoints."""
+        from terrology.cli import _setup_utm
+
+        route = [[-0.1, 51.4], [-0.15, 51.5], [-0.2, 51.6]]
+        params = {
+            "route": route,
+            "terrain_exag": 2.0,
+            "colors": 4,
+            "span_buffer": 0.05,
+        }
+        kwargs = self._run_worker(params, tmp_path)
+
+        assert len(kwargs["route_points_utm"]) == 3
+
+        lat = (51.4 + 51.6) / 2
+        lon = (-0.1 + -0.2) / 2
+        _, to_utm, _ = _setup_utm(lat, lon)
+
+        first_expected = to_utm.transform(-0.1, 51.4)
+        last_expected = to_utm.transform(-0.2, 51.6)
+
+        assert kwargs["route_points_utm"][0] == pytest.approx(first_expected, rel=1e-6)
+        assert kwargs["route_points_utm"][-1] == pytest.approx(last_expected, rel=1e-6)
+
+    def test_route_width_forwarded(self, tmp_path):
+        """route_width must be forwarded to run_pipeline."""
+        params = {
+            "route": [[-0.1, 51.4], [-0.2, 51.6]],
+            "terrain_exag": 2.0,
+            "colors": 4,
+            "route_width": 2.5,
+        }
+        kwargs = self._run_worker(params, tmp_path)
+        assert kwargs["route_width"] == 2.5
+
+    def test_two_point_bbox_utm_brackets_both_points(self, tmp_path):
+        """Two-point mode: bbox_utm must contain both projected points."""
+        from terrology.cli import _bbox_with_buffer, _setup_utm
+
+        lat1, lon1 = 51.4, -0.1
+        lat2, lon2 = 51.6, -0.3
+        span_buffer = 0.05
+        params = {
+            "lat": lat1,
+            "lon": lon1,
+            "to_lat": lat2,
+            "to_lon": lon2,
+            "terrain_exag": 2.0,
+            "colors": 4,
+            "span_buffer": span_buffer,
+        }
+        kwargs = self._run_worker(params, tmp_path)
+
+        lat = (lat1 + lat2) / 2
+        lon = (lon1 + lon2) / 2
+        _, to_utm, _ = _setup_utm(lat, lon)
+        x1, y1 = to_utm.transform(lon1, lat1)
+        x2, y2 = to_utm.transform(lon2, lat2)
+        expected_bbox = _bbox_with_buffer([x1, x2], [y1, y2], span_buffer)
+
+        assert kwargs["bbox_utm"] == pytest.approx(expected_bbox, rel=1e-6)
+
+    def test_polygon_smooth_boundary(self, tmp_path):
+        """Polygon + smooth_boundary=2: exterior coord count roughly quadruples."""
+        # Simple square polygon (4 corners)
+        polygon = [
+            [-0.2, 51.4],
+            [-0.1, 51.4],
+            [-0.1, 51.5],
+            [-0.2, 51.5],
+            [-0.2, 51.4],  # closing ring
+        ]
+        params = {
+            "polygon": polygon,
+            "smooth_boundary": 2,
+            "terrain_exag": 2.0,
+            "colors": 4,
+        }
+        captured = {}
+
+        def fake_run_pipeline(**kwargs):
+            captured.update(kwargs)
+
+        from web.generate import _worker
+
+        with patch("terrology.cli.run_pipeline", side_effect=fake_run_pipeline):
+            _worker(json.dumps(params), str(tmp_path))
+
+        # After 2 Chaikin iterations: 4 corners → 8 → 16 (exterior is closed so +1 for coords)
+        poly = captured.get("clip_polygon_wgs84")
+        assert poly is not None
+        # Original had 4 unique corners; after 2 iterations should have ~16
+        n_coords = len(poly.exterior.coords) - 1  # exclude closing duplicate
+        assert n_coords >= 12, (
+            f"Expected at least 12 coords after 2 Chaikin iterations, got {n_coords}"
+        )
+
+    def test_passthrough_kwargs(self, tmp_path):
+        """All passthrough kwargs must be forwarded to run_pipeline."""
+        params = {
+            "lat": 51.5,
+            "lon": -0.1,
+            "radius": 500,
+            "terrain_exag": 2.0,
+            "colors": 4,
+            "scale": 5000.0,
+            "size": 200.0,
+            "min_building_area": 25.0,
+            "color_depth_mm": 2.0,
+            "waterway_width": 1.5,
+            "raceway_width": 2.0,
+            "no_terrain": False,
+        }
+        kwargs = self._run_worker(params, tmp_path)
+
+        assert kwargs["scale"] == 5000.0
+        assert kwargs["size"] == 200.0
+        assert kwargs["min_building_area"] == 25.0
+        assert kwargs["color_depth_mm"] == 2.0
+        assert kwargs["waterway_width"] == 1.5
+        assert kwargs["raceway_width"] == 2.0
+        assert kwargs["no_terrain"] is False
+
+    def test_status_json_ready_on_success(self, tmp_path):
+        """_status.json must be written as ready on success."""
+        params = {
+            "lat": 51.5,
+            "lon": -0.1,
+            "radius": 500,
+            "terrain_exag": 2.0,
+            "colors": 4,
+        }
+        from web.generate import _worker
+
+        with patch("terrology.cli.run_pipeline"):
+            _worker(json.dumps(params), str(tmp_path))
+
+        status = json.loads((tmp_path / "_status.json").read_text())
+        assert status["status"] == "ready"
+
+    def test_status_json_error_on_exception(self, tmp_path):
+        """_status.json must be written as error when run_pipeline raises."""
+        params = {
+            "lat": 51.5,
+            "lon": -0.1,
+            "radius": 500,
+            "terrain_exag": 2.0,
+            "colors": 4,
+        }
+        from web.generate import _worker
+
+        with patch("terrology.cli.run_pipeline", side_effect=RuntimeError("boom")):
+            _worker(json.dumps(params), str(tmp_path))
+
+        status = json.loads((tmp_path / "_status.json").read_text())
+        assert status["status"] == "error"
+        assert "boom" in status["error"]

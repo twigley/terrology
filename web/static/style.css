@@ -86,6 +86,42 @@ h1 {
     background: #fff;
 }
 
+/* File inputs */
+.file-input {
+    display: block;
+    width: 100%;
+    padding: 5px 0;
+    font-size: .82rem;
+    color: #555;
+    cursor: pointer;
+}
+.file-input::-webkit-file-upload-button {
+    padding: 5px 10px;
+    background: #f3f4f6;
+    color: #374151;
+    border: 1.5px solid #d1d5db;
+    border-radius: 5px;
+    font-size: .8rem;
+    font-weight: 500;
+    cursor: pointer;
+    margin-right: 8px;
+    transition: background .12s;
+}
+.file-input::-webkit-file-upload-button:hover { background: #e5e7eb; }
+.file-input::file-selector-button {
+    padding: 5px 10px;
+    background: #f3f4f6;
+    color: #374151;
+    border: 1.5px solid #d1d5db;
+    border-radius: 5px;
+    font-size: .8rem;
+    font-weight: 500;
+    cursor: pointer;
+    margin-right: 8px;
+    transition: background .12s;
+}
+.file-input::file-selector-button:hover { background: #e5e7eb; }
+
 .search-row {
     display: flex;
     gap: 6px;
@@ -139,7 +175,7 @@ h1 {
 }
 .clear-link:hover { color: #ef4444; }
 
-/* Segmented shape control */
+/* Segmented control */
 .seg-control {
     display: flex;
     border: 1.5px solid #ddd;
@@ -162,6 +198,12 @@ h1 {
 .seg-btn:hover { background: #f3f4f6; }
 .seg-btn.active { background: #3b82f6; color: #fff; }
 
+/* 3-up mode toggle: slightly smaller text so it fits */
+.seg-control-3 .seg-btn {
+    font-size: .76rem;
+    padding: 7px 2px;
+}
+
 /* Small hint below a field */
 .field-hint {
     display: block;
@@ -170,12 +212,21 @@ h1 {
     margin-top: 3px;
 }
 
-/* Advanced section */
+/* Scale size warning */
+.scale-size-warn {
+    color: #dc2626 !important;
+    font-weight: 600;
+}
+
+/* Collapsible groups — shared styles */
+details.group,
 details.advanced {
-    margin-bottom: 10px;
+    margin-bottom: 8px;
     border: 1.5px solid #e5e7eb;
     border-radius: 8px;
 }
+
+details.group summary,
 details.advanced summary {
     padding: 7px 10px;
     font-size: .78rem;
@@ -189,25 +240,67 @@ details.advanced summary {
     border-radius: 6px;
     list-style: none;
 }
+
+details.group[open] summary,
 details.advanced[open] summary {
     border-radius: 6px 6px 0 0;
     border-bottom: 1.5px solid #e5e7eb;
     margin-bottom: 0;
 }
+
+details.group summary:hover,
 details.advanced summary:hover { background: #f3f4f6; }
+
+details.group summary::-webkit-details-marker,
 details.advanced summary::-webkit-details-marker { display: none; }
+
+details.group summary::before,
 details.advanced summary::before {
     content: '▸';
     display: inline-block;
     margin-right: 6px;
     transition: transform .15s;
 }
+
+details.group[open] summary::before,
 details.advanced[open] summary::before { transform: rotate(90deg); }
+
+details.group > .field,
 details.advanced > .field {
     padding: 0 10px;
     margin-top: 8px;
 }
+
+details.group > .field:last-child,
 details.advanced > .field:last-child { margin-bottom: 8px; }
+
+/* Inner mode blocks inside group */
+details.group > #pin-options,
+details.group > #area-options,
+details.group > #route-options {
+    padding: 8px 10px 4px;
+}
+
+/* Small secondary button used inside groups */
+button.secondary-sm {
+    padding: 6px 10px;
+    background: #f3f4f6;
+    color: #374151;
+    border: 1.5px solid #d1d5db;
+    border-radius: 6px;
+    font-size: .8rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background .12s;
+}
+button.secondary-sm:hover { background: #e5e7eb; }
+button.secondary-sm.active { background: #fef3c7; border-color: #f59e0b; color: #92400e; }
+
+/* Route point icons */
+.route-point-icon {
+    background: transparent;
+    border: none;
+}
 
 /* Divider */
 .divider {

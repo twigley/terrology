@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import math
 import os
 import uuid
 import zipfile
@@ -60,6 +61,22 @@ app = FastAPI(title="Terrology", lifespan=lifespan)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+_MAX_ROUTE_SPAN_KM = 300.0
+
+
+def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Return great-circle distance in km between two WGS84 points."""
+    R = 6371.0
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1))
+        * math.cos(math.radians(lat2))
+        * math.sin(dlon / 2) ** 2
+    )
+    return R * 2 * math.asin(math.sqrt(a))
+
 
 class JobParams(BaseModel):
     lat: float | None = Field(None, ge=-90, le=90)
@@ -82,12 +99,104 @@ class JobParams(BaseModel):
     building_exag: float | None = Field(None, ge=0.5, le=5.0)
     dem_source: str = Field("glo30", pattern="^(glo30|srtm|aw3d30)$")
 
+    # New fields
+    route: list[list[float]] | None = None  # [[lon, lat], ...] client-parsed GPX
+    route_width: float = Field(1.5, ge=0.5, le=5.0)
+    to_lat: float | None = Field(None, ge=-90, le=90)
+    to_lon: float | None = Field(None, ge=-180, le=180)
+    span_buffer: float = Field(0.05, ge=0.0, le=0.5)
+    size: float = Field(190.0, ge=100.0, le=256.0)
+    scale: float | None = Field(None, ge=1000.0, le=250000.0)
+    raceway_width: float = Field(1.5, ge=0.5, le=5.0)
+    waterway_width: float = Field(1.0, ge=0.2, le=5.0)
+    color_depth_mm: float = Field(1.5, ge=0.5, le=3.0)
+    min_building_area: float | None = Field(None, ge=0.0, le=500.0)  # None = auto
+    smooth_boundary: int = Field(0, ge=0, le=6)
+    no_terrain: bool = False
+
     @model_validator(mode="after")
     def check_location(self):
-        if self.polygon is None and (self.lat is None or self.lon is None):
-            raise ValueError("Provide either polygon or lat+lon")
+        # --- Mutual exclusions ---
+        if self.route is not None and (
+            self.to_lat is not None or self.to_lon is not None
+        ):
+            raise ValueError("route and to_lat/to_lon are mutually exclusive")
+
+        if (
+            self.to_lat is not None or self.to_lon is not None
+        ) and self.polygon is not None:
+            raise ValueError("to_lat/to_lon and polygon are mutually exclusive")
+
+        if (self.to_lat is None) != (self.to_lon is None):
+            raise ValueError("to_lat and to_lon must both be present or both absent")
+
+        # Two-point mode requires a starting lat+lon
+        if self.to_lat is not None and (self.lat is None or self.lon is None):
+            raise ValueError("to_lat/to_lon (two-point mode) requires lat and lon")
+
+        # --- no_terrain conflicts ---
+        if self.no_terrain and self.no_buildings:
+            raise ValueError(
+                "no_terrain and no_buildings together produce an empty model"
+            )
+        if self.no_terrain and self.route is not None:
+            raise ValueError(
+                "no_terrain and route are incompatible (route is painted onto the terrain surface)"
+            )
+
+        # --- Validate route points ---
+        if self.route is not None:
+            if len(self.route) < 2:
+                raise ValueError("route must have at least 2 points")
+            if len(self.route) > 5000:
+                raise ValueError("route must have at most 5000 points")
+            for pt in self.route:
+                if len(pt) != 2:
+                    raise ValueError(
+                        "Each route point must have exactly 2 elements [lon, lat]"
+                    )
+                lon_, lat_ = pt
+                if not (-180 <= lon_ <= 180):
+                    raise ValueError(
+                        f"Route point longitude {lon_} out of range [-180, 180]"
+                    )
+                if not (-90 <= lat_ <= 90):
+                    raise ValueError(
+                        f"Route point latitude {lat_} out of range [-90, 90]"
+                    )
+
+            # Span check: approximate bounding box diagonal
+            lats = [pt[1] for pt in self.route]
+            lons = [pt[0] for pt in self.route]
+            span_km = _haversine_km(min(lats), min(lons), max(lats), max(lons))
+            if span_km > _MAX_ROUTE_SPAN_KM:
+                raise ValueError(
+                    f"Route spans approximately {span_km:.0f} km, which exceeds the "
+                    f"{_MAX_ROUTE_SPAN_KM:.0f} km limit for free hosting"
+                )
+
+        # --- Two-point span check ---
+        if self.to_lat is not None and self.lat is not None and self.lon is not None:
+            span_km = _haversine_km(self.lat, self.lon, self.to_lat, self.to_lon)
+            if span_km > _MAX_ROUTE_SPAN_KM:
+                raise ValueError(
+                    f"Two-point span is approximately {span_km:.0f} km, which exceeds the "
+                    f"{_MAX_ROUTE_SPAN_KM:.0f} km limit for free hosting"
+                )
+
+        # --- Location requirement ---
+        has_location = (
+            self.polygon is not None
+            or self.route is not None
+            or (self.lat is not None and self.lon is not None)
+        )
+        if not has_location:
+            raise ValueError("Provide either polygon, route, or lat+lon")
+
+        # --- Polygon validation ---
         if self.polygon is not None and len(self.polygon) < 3:
             raise ValueError("Polygon must have at least 3 points")
+
         return self
 
 
